@@ -56,6 +56,21 @@ class FunnelStats:
     feedback_negative: int
 
 
+@dataclass(frozen=True)
+class DailyFunnelStats:
+    date_utc: str
+    starts: int
+    task_submitters: int
+    answer_users: int
+    buy_users: int
+    invoice_users: int
+    buyers: int
+    payments: int
+    stars: int
+    feedback_positive: int
+    feedback_negative: int
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -549,6 +564,79 @@ class Database:
             feedback_positive=events.get("feedback_positive", (0, 0))[0],
             feedback_negative=events.get("feedback_negative", (0, 0))[0],
         )
+
+    def daily_funnel_stats(self, days: int = 30) -> list[DailyFunnelStats]:
+        """Return privacy-safe daily aggregates, including dates with no activity."""
+        if days not in (1, 7, 30):
+            raise ValueError("days must be 1, 7, or 30")
+        start_offset = f"-{days - 1} days"
+        with self._connection() as db:
+            rows = db.execute(
+                """WITH RECURSIVE dates(day) AS (
+                    SELECT date('now', ?)
+                    UNION ALL
+                    SELECT date(day, '+1 day') FROM dates WHERE day < date('now')
+                ), event_daily AS (
+                    SELECT date(created_at) AS day,
+                    COUNT(DISTINCT CASE WHEN event_name='start' THEN telegram_id END) AS starts,
+                    COUNT(DISTINCT CASE WHEN event_name IN
+                        ('text_task_submitted', 'photo_submitted') THEN telegram_id END)
+                        AS task_submitters,
+                    COUNT(DISTINCT CASE WHEN event_name='answer_completed'
+                        THEN telegram_id END) AS answer_users,
+                    COUNT(DISTINCT CASE WHEN event_name='buy_opened'
+                        THEN telegram_id END) AS buy_users,
+                    COUNT(DISTINCT CASE WHEN event_name='invoice_requested'
+                        THEN telegram_id END) AS invoice_users,
+                    SUM(CASE WHEN event_name='feedback_positive' THEN 1 ELSE 0 END)
+                        AS feedback_positive,
+                    SUM(CASE WHEN event_name='feedback_negative' THEN 1 ELSE 0 END)
+                        AS feedback_negative
+                    FROM events
+                    WHERE created_at >= date('now', ?)
+                    GROUP BY date(created_at)
+                ), payment_daily AS (
+                    SELECT date(created_at) AS day,
+                    COUNT(DISTINCT telegram_id) AS buyers,
+                    COUNT(*) AS payments,
+                    COALESCE(SUM(stars), 0) AS stars
+                    FROM payments
+                    WHERE created_at >= date('now', ?)
+                    GROUP BY date(created_at)
+                )
+                SELECT dates.day,
+                    COALESCE(e.starts, 0) AS starts,
+                    COALESCE(e.task_submitters, 0) AS task_submitters,
+                    COALESCE(e.answer_users, 0) AS answer_users,
+                    COALESCE(e.buy_users, 0) AS buy_users,
+                    COALESCE(e.invoice_users, 0) AS invoice_users,
+                    COALESCE(p.buyers, 0) AS buyers,
+                    COALESCE(p.payments, 0) AS payments,
+                    COALESCE(p.stars, 0) AS stars,
+                    COALESCE(e.feedback_positive, 0) AS feedback_positive,
+                    COALESCE(e.feedback_negative, 0) AS feedback_negative
+                FROM dates
+                LEFT JOIN event_daily e ON e.day=dates.day
+                LEFT JOIN payment_daily p ON p.day=dates.day
+                ORDER BY dates.day""",
+                (start_offset, start_offset, start_offset),
+            ).fetchall()
+        return [
+            DailyFunnelStats(
+                date_utc=str(row["day"]),
+                starts=int(row["starts"]),
+                task_submitters=int(row["task_submitters"]),
+                answer_users=int(row["answer_users"]),
+                buy_users=int(row["buy_users"]),
+                invoice_users=int(row["invoice_users"]),
+                buyers=int(row["buyers"]),
+                payments=int(row["payments"]),
+                stars=int(row["stars"]),
+                feedback_positive=int(row["feedback_positive"]),
+                feedback_negative=int(row["feedback_negative"]),
+            )
+            for row in rows
+        ]
 
     def save_photo_session(
         self, telegram_id: int, recognized_tasks: str, access_source: str = "photo_paid",

@@ -8,6 +8,7 @@ from app.bot import (
     defense_callback,
     feedback_callback,
     funnel,
+    funnel_csv,
     handle_photo,
     handle_question,
     photo_callback,
@@ -21,9 +22,14 @@ class FakeMessage:
         self.caption = "Реши задачу 1"
         self.text = "Теперь реши задачу 2"
         self.sent = []
+        self.sent_documents = []
 
     async def reply_text(self, text, **kwargs):
         self.sent.append((text, kwargs))
+        return self
+
+    async def reply_document(self, document, **kwargs):
+        self.sent_documents.append((document, kwargs))
         return self
 
 
@@ -207,6 +213,21 @@ class BotFlowTest(unittest.IsolatedAsyncioTestCase):
         await funnel(self.update(), self.context)
         self.assertIn("последние 30 дн.", self.message.sent[-1][0])
         self.assertIn("Уникальные старты: <b>1</b>", self.message.sent[-1][0])
+
+    async def test_funnel_csv_is_owner_only_and_privacy_safe(self) -> None:
+        self.context.args = ["30"]
+        await funnel_csv(self.update(), self.context)
+        self.assertIn("только владельцу", self.message.sent[-1][0])
+
+        self.user.id = 999
+        self.db.log_event(777, "start")
+        await funnel_csv(self.update(), self.context)
+
+        document, kwargs = self.message.sent_documents[-1]
+        content = document.input_file_content.decode("utf-8-sig")
+        self.assertIn("date_utc,starts,task_submitters", content)
+        self.assertNotIn("777", content)
+        self.assertIn("Без Telegram ID", kwargs["caption"])
 
     async def test_defense_callback_is_free_and_reuses_cached_result(self) -> None:
         ai = SuccessfulAI()

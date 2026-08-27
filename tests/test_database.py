@@ -206,6 +206,22 @@ class DatabaseTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.db.funnel_stats(2)
 
+    def test_daily_funnel_includes_zero_days_and_no_personal_data(self) -> None:
+        self.db.log_event(101, "start")
+        self.db.log_event(101, "text_task_submitted")
+        self.db.add_payment(101, "daily-payment", 25, 1)
+
+        rows = self.db.daily_funnel_stats(7)
+
+        self.assertEqual(len(rows), 7)
+        self.assertEqual(rows[-1].starts, 1)
+        self.assertEqual(rows[-1].task_submitters, 1)
+        self.assertEqual(rows[-1].stars, 25)
+        self.assertEqual(sum(row.starts for row in rows[:-1]), 0)
+        self.assertNotIn("telegram_id", rows[-1].__dict__)
+        with self.assertRaises(ValueError):
+            self.db.daily_funnel_stats(2)
+
     def test_feedback_is_counted_once_per_answer_even_if_polarity_changes(self) -> None:
         request_id = self.db.log_request(70, "trial", 1, 2, 0.0, "completed")
         self.assertTrue(self.db.record_feedback(70, request_id, positive=True))

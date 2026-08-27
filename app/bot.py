@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import html
+import io
 import logging
 import re
 from contextlib import suppress
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
+from telegram import (
+    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, LabeledPrice, Update,
+)
 from telegram.constants import ChatAction
 from telegram.ext import (
     Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
@@ -15,7 +19,7 @@ from telegram.ext import (
 
 from app.ai_service import AIService
 from app.config import Settings, load_settings
-from app.database import Database, FunnelStats
+from app.database import DailyFunnelStats, Database, FunnelStats
 
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -24,7 +28,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 SINGLE_PAYLOAD = "task_help_1_v1"
 PACK_PAYLOAD = "task_help_5_v1"
-BOT_VERSION = "1.5.0"
+BOT_VERSION = "1.6.0"
 FOUNDER_NAME = "Yujio (yujio-dev)"
 GITHUB_URL = "https://github.com/yujio-dev/student-ai-bot"
 PHOTO_PRICE_STARS = 100
@@ -150,6 +154,34 @@ def format_funnel_message(stats: FunnelStats, days: int) -> str:
         f"Заработано: <b>{stats.stars} Stars</b>\n"
         f"Отзывы: 👍 {stats.feedback_positive}  👎 {stats.feedback_negative}"
     )
+
+
+def build_funnel_csv(rows: list[DailyFunnelStats]) -> bytes:
+    """Build a privacy-safe UTF-8 CSV for spreadsheet import."""
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow([
+        "date_utc", "starts", "task_submitters", "answer_users", "buy_users",
+        "invoice_users", "buyers", "payments", "stars", "feedback_positive",
+        "feedback_negative", "task_from_start_pct", "answer_from_task_pct",
+        "buy_from_answer_pct", "invoice_from_buy_pct", "buyer_from_invoice_pct",
+    ])
+
+    def percent(current: int, previous: int) -> float:
+        return round(current / previous * 100, 1) if previous else 0.0
+
+    for row in rows:
+        writer.writerow([
+            row.date_utc, row.starts, row.task_submitters, row.answer_users, row.buy_users,
+            row.invoice_users, row.buyers, row.payments, row.stars,
+            row.feedback_positive, row.feedback_negative,
+            percent(row.task_submitters, row.starts),
+            percent(row.answer_users, row.task_submitters),
+            percent(row.buy_users, row.answer_users),
+            percent(row.invoice_users, row.buy_users),
+            percent(row.buyers, row.invoice_users),
+        ])
+    return output.getvalue().encode("utf-8-sig")
 
 
 def feedback_keyboard(request_id: int, feedback_enabled: bool = True) -> InlineKeyboardMarkup:
@@ -392,6 +424,26 @@ async def funnel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     days = int(context.args[0]) if context.args else 7
     await update.message.reply_text(
         format_funnel_message(db.funnel_stats(days), days), parse_mode="HTML"
+    )
+
+
+async def funnel_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings, db, _ = services(context)
+    if update.effective_user.id != settings.owner_telegram_id:
+        await update.message.reply_text("Команда доступна только владельцу бота.")
+        return
+    if len(context.args) > 1 or (context.args and context.args[0] not in {"1", "7", "30"}):
+        await update.message.reply_text("Формат: /funnelcsv 1, /funnelcsv 7 или /funnelcsv 30")
+        return
+    days = int(context.args[0]) if context.args else 30
+    filename = f"taskmentor-funnel-{days}d.csv"
+    document = InputFile(io.BytesIO(build_funnel_csv(db.daily_funnel_stats(days))), filename)
+    await update.message.reply_document(
+        document=document,
+        caption=(
+            f"Воронка по дням за {days} дн. (UTC). Без Telegram ID, имён и текстов задач. "
+            "Импортируй файл в лист «Факт CSV» в Excel или Google Sheets."
+        ),
     )
 
 
@@ -838,6 +890,7 @@ async def post_init(application: Application) -> None:
         BotCommand("referral", "Пригласить друга"),
         BotCommand("about", "О боте и открытом коде"),
         BotCommand("funnel", "Воронка запуска (владелец)"),
+        BotCommand("funnelcsv", "Выгрузить воронку в CSV (владелец)"),
         BotCommand("terms", "Условия"),
         BotCommand("paysupport", "Поддержка по оплате"),
     ])
@@ -877,6 +930,7 @@ def main() -> None:
     application.add_handler(CommandHandler("partner", partner))
     application.add_handler(CommandHandler("refstats", refstats))
     application.add_handler(CommandHandler("funnel", funnel))
+    application.add_handler(CommandHandler("funnelcsv", funnel_csv))
     application.add_handler(CommandHandler("terms", terms))
     application.add_handler(CommandHandler(["support", "paysupport"], support))
     application.add_handler(PreCheckoutQueryHandler(precheckout))
