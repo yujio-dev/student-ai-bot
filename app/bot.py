@@ -24,7 +24,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 SINGLE_PAYLOAD = "task_help_1_v1"
 PACK_PAYLOAD = "task_help_5_v1"
-BOT_VERSION = "1.3.0"
+BOT_VERSION = "1.3.1"
 FOUNDER_NAME = "Yujio (yujio-dev)"
 GITHUB_URL = "https://github.com/yujio-dev/student-ai-bot"
 PHOTO_PRICE_STARS = 100
@@ -33,6 +33,7 @@ PHOTO_CREDITS = 5
 
 def markdown_to_telegram_html(text: str) -> str:
     """Convert the small Markdown subset requested from the model to Telegram HTML."""
+    text = text.replace("\u2014", "-").replace("\u2013", "-")
     result: list[str] = []
     code_lines: list[str] = []
     in_code = False
@@ -98,6 +99,24 @@ def format_about_message(solved_tasks: int) -> str:
     )
 
 
+def format_start_message() -> str:
+    return (
+        "Привет! Я помогу разобрать учебную задачу и подготовить понятное объяснение "
+        "для защиты.\n\n"
+        "Как отправить задачу:\n"
+        "• Текстом - первый распознанный разбор бесплатный.\n"
+        f"• Одной фотографией - {PHOTO_PRICE_STARS} Stars или {PHOTO_CREDITS} "
+        "оплаченных попыток. Перед списанием я попрошу подтверждение.\n\n"
+        "Что будет в ответе:\n"
+        "• решение по шагам;\n"
+        "• проверка результата;\n"
+        "• объяснение, которое можно использовать на защите.\n\n"
+        "Баланс: /balance\n"
+        "Купить попытки: /buy\n"
+        "Все возможности и ограничения: /faq"
+    )
+
+
 def services(context: ContextTypes.DEFAULT_TYPE) -> tuple[Settings, Database, AIService]:
     data = context.application.bot_data
     return data["settings"], data["db"], data["ai"]
@@ -109,15 +128,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     is_new_user = db.ensure_user(user.id, user.username)
     if is_new_user and context.args and context.args[0].startswith("ref_"):
         db.attach_referral(user.id, context.args[0][4:].upper())
-    await update.message.reply_text(
-        "Привет! Пришли учебную задачу текстом или одной фотографией — я определю "
-        "предмет, разберу решение "
-        "по шагам и помогу подготовить понятное объяснение.\n\n"
-        "Первый разбор бесплатный. Важно: первое сообщение, которое бот распознает как "
-        "конкретную учебную задачу, будет использовано как бесплатный разбор. Приветствия "
-        "и вопросы о работе бота попытку не расходуют. Фоторазбор оплачивается отдельно: "
-        f"{PHOTO_PRICE_STARS} Stars или {PHOTO_CREDITS} оплаченных попыток. Подробнее: /faq"
-    )
+    await update.message.reply_text(format_start_message())
 
 
 async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -136,7 +147,7 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"разборов за {settings.pack_price_stars} Stars вместо "
         f"{settings.single_price_stars * settings.pack_credits}. Купить: /buy\n\n"
         "Какие ограничения?\n"
-        "Текст — до 6000 символов. Можно отправить одну фотографию задачи; перед обработкой "
+        "Текст - до 6000 символов. Можно отправить одну фотографию задачи; перед обработкой "
         f"бот предупредит о цене и попросит подтверждение. Фоторазбор стоит {PHOTO_PRICE_STARS} "
         f"Stars или списывает {PHOTO_CREDITS} оплаченных попыток. PDF и другие файлы пока не "
         "принимаются. Ответ AI стоит перепроверять.\n\n"
@@ -169,10 +180,10 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     regular_pack_price = settings.single_price_stars * settings.pack_credits
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
-            f"1 разбор — {settings.single_price_stars} ⭐", callback_data="buy:1"
+            f"1 разбор - {settings.single_price_stars} ⭐", callback_data="buy:1"
         )],
         [InlineKeyboardButton(
-            f"{settings.pack_credits} разборов — {settings.pack_price_stars} ⭐ (вместо {regular_pack_price})",
+            f"{settings.pack_credits} разборов - {settings.pack_price_stars} ⭐ (вместо {regular_pack_price})",
             callback_data="buy:5",
         )],
     ])
@@ -192,7 +203,7 @@ async def send_product_invoice(
         description = "Пошаговое решение, объяснение и проверка результата."
     else:
         credits, stars, payload = settings.pack_credits, settings.pack_price_stars, PACK_PAYLOAD
-        title = f"{credits} разборов — выгодный пакет"
+        title = f"{credits} разборов - выгодный пакет"
         description = (
             f"По одному: {settings.single_price_stars * credits} Stars. "
             f"Цена пакета: {stars} Stars."
@@ -316,7 +327,7 @@ async def refstats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     for item in stats:
         kind = "деньги" if item.kind == "cash" else "бесплатные разборы"
         lines.append(
-            f"\n<b>{html.escape(item.label)}</b> — {kind}\n"
+            f"\n<b>{html.escape(item.label)}</b> - {kind}\n"
             f"Код: <code>{item.code}</code>\n"
             f"Запустили бота: {item.joins}\n"
             f"Покупателей: {item.buyers}\n"
@@ -357,7 +368,7 @@ async def reactivation_loop(application: Application) -> None:
 async def terms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "Бот помогает разбирать учебные задачи. Ответы AI могут содержать "
-        "ошибки — проверяй код перед сдачей. Оплата даёт указанное число разборов. "
+        "ошибки - проверяй код перед сдачей. Оплата даёт указанное число разборов. "
         "При технической ошибке кредит возвращается. Возврат Stars по спорной покупке "
         "рассматривается через /paysupport. Не отправляй персональные данные и секреты."
     )
@@ -377,7 +388,7 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not text:
         return
     if len(text) > 6000:
-        await update.message.reply_text("Сейчас лимит — 6000 символов. Оставь условие и проблемный код.")
+        await update.message.reply_text("Сейчас лимит - 6000 символов. Оставь условие и проблемный код.")
         return
     user = update.effective_user
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
@@ -419,7 +430,7 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         db.restore_access(user.id, access.source, access.credits_charged)
         db.log_request(user.id, access.source, 0, 0, 0, "failed")
         await update.message.reply_text(
-            "Не удалось получить ответ. Бесплатный разбор или кредит возвращён — попробуй позже."
+            "Не удалось получить ответ. Бесплатный разбор или кредит возвращён - попробуй позже."
         )
 
 
@@ -434,13 +445,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     }
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
-            f"Подтвердить — {PHOTO_CREDITS} попыток",
+            f"Подтвердить - {PHOTO_CREDITS} попыток",
             callback_data="photo:confirm",
         )],
         [InlineKeyboardButton("Отмена", callback_data="photo:cancel")],
     ])
     await update.message.reply_text(
-        "Фоторазбор — отдельная функция. Он стоит 100 Telegram Stars или списывает "
+        "Фоторазбор - отдельная функция. Он стоит 100 Telegram Stars или списывает "
         f"{PHOTO_CREDITS} оплаченных попыток. Бесплатный первый разбор для фото не действует.\n\n"
         "После подтверждения я распознаю условие и решу задачу. Если цена кажется "
         "завышенной или заниженной, напиши в поддержку: /paysupport.",
@@ -496,7 +507,7 @@ async def photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         db.restore_access(user.id, access.source, access.credits_charged)
         db.log_request(user.id, access.source, 0, 0, 0, "failed")
         await update.effective_message.reply_text(
-            f"Не удалось обработать фото. Все {PHOTO_CREDITS} попыток возвращены — "
+            f"Не удалось обработать фото. Все {PHOTO_CREDITS} попыток возвращены - "
             "пришли фотографию ещё раз."
         )
 
