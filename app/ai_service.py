@@ -47,6 +47,9 @@ PRODUCT_CAPABILITIES = """
 - бот решает учебные задачи, отправленные текстом;
 - бот отдельно обрабатывает одну фотографию учебной задачи после подтверждения цены:
   100 Telegram Stars или 5 оплаченных разборов;
+- после фоторазбора бот хранит распознанные условия 24 часа и может по очереди
+  разбирать задачи с этой фотографии без повторной оплаты фото;
+- команда /newtask удаляет сохранённый контекст фотографии;
 - бот пока не принимает PDF и другие файлы и не создаёт изображения, DOCX, PPTX или PDF;
 - бесплатный первый текстовый разбор не оплачивает фоторазбор.
 Никогда не придумывай и не обещай функции, которых нет в этом списке. Если пользователь
@@ -54,6 +57,16 @@ PRODUCT_CAPABILITIES = """
 в /faq. Не утверждай, что бот уже умеет что-либо только потому, что это технически можно
 добавить в будущем.
 Никогда не используй символы Unicode U+2014 и U+2013. Используй только обычный `-`.
+""".strip()
+
+
+IMAGE_EXTRACTION_INSTRUCTIONS = """
+Ты распознаёшь учебные задания на фотографии. Перепиши все видимые условия точно и
+структурированно, сохраняя нумерацию, формулы, значения, единицы измерения и вопросы.
+Начни с заголовка **Распознано на фото**. Не решай задачи и не добавляй отсутствующие
+данные. Неразборчивый фрагмент пометь как [неразборчиво] и кратко укажи, что нужно
+переснять. Никогда не используй символы Unicode U+2014 и U+2013 - только обычный `-`.
+Используй простой Markdown без таблиц.
 """.strip()
 
 
@@ -103,7 +116,9 @@ class AIService:
                 items.append(item)
         return items
 
-    def _complete_answer(self, input_items: list, min_output_tokens: int = 0) -> AIAnswer:
+    def _complete_answer(
+        self, input_items: list, min_output_tokens: int = 0, instructions: str = INSTRUCTIONS,
+    ) -> AIAnswer:
         """Continue responses that stop only because they reached the output limit."""
         history = list(input_items)
         text_parts: list[str] = []
@@ -114,7 +129,7 @@ class AIService:
         for _ in range(4):
             response = self.client.responses.create(
                 model=self.model,
-                instructions=INSTRUCTIONS,
+                instructions=instructions,
                 input=history,
                 max_output_tokens=max_tokens,
                 reasoning={"effort": "low"},
@@ -209,3 +224,47 @@ class AIService:
                 },
             ],
         }], min_output_tokens=4000)
+
+    def extract_image_tasks(self, image_bytes: bytes) -> AIAnswer:
+        """Read all tasks once so later answers can reuse text instead of the image."""
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        return self._complete_answer([{
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": (
+                        "Распознай все учебные задачи на фотографии. Включи всё, что "
+                        "понадобится для их последующего решения."
+                    ),
+                },
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/jpeg;base64,{encoded}",
+                    "detail": "high",
+                },
+            ],
+        }], min_output_tokens=2000, instructions=IMAGE_EXTRACTION_INSTRUCTIONS)
+
+    def answer_photo_session(
+        self, recognized_tasks: str, request: str, previous_request: str = "",
+    ) -> AIAnswer:
+        """Answer only the requested part using a previously recognized photo."""
+        previous_context = (
+            f"Предыдущий запрос в этой фото-сессии:\n{previous_request.strip()}\n\n"
+            if previous_request.strip() else ""
+        )
+        prompt = (
+            "Ниже сохранённое распознанное содержание последней фотографии пользователя.\n\n"
+            f"{recognized_tasks}\n\n"
+            "Текущий запрос пользователя:\n"
+            f"{request.strip()}\n\n"
+            f"{previous_context}"
+            "Ответь только на запрошенную задачу или задачи. Не решай остальные номера. "
+            "Если номер или просьба неясны, задай одно короткое уточнение. В разделе "
+            "1. **Дано** структурированно выпиши данные только выбранных задач."
+        )
+        return self._complete_answer([{
+            "role": "user",
+            "content": [{"type": "input_text", "text": prompt}],
+        }], min_output_tokens=3000)

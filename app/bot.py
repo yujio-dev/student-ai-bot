@@ -24,11 +24,12 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 SINGLE_PAYLOAD = "task_help_1_v1"
 PACK_PAYLOAD = "task_help_5_v1"
-BOT_VERSION = "1.3.2"
+BOT_VERSION = "1.4.0"
 FOUNDER_NAME = "Yujio (yujio-dev)"
 GITHUB_URL = "https://github.com/yujio-dev/student-ai-bot"
 PHOTO_PRICE_STARS = 100
 PHOTO_CREDITS = 5
+PHOTO_SESSION_HOURS = 24
 
 
 def markdown_to_telegram_html(text: str) -> str:
@@ -87,6 +88,21 @@ def split_message(text: str, limit: int = 4000) -> list[str]:
     return parts
 
 
+def is_photo_followup(text: str) -> bool:
+    """Recognize clear references to tasks from the current photo session."""
+    normalized = text.casefold().strip()
+    references = (
+        r"\bзадач[а-я]*\s*(?:№\s*)?\d+",
+        r"\b\d+(?:\s*(?:,|и)\s*\d+)*\s+задач[а-я]*\b",
+        r"\bпункт[а-я]*\s*(?:№\s*)?\d+",
+        r"\bномер[а-я]*\s*\d+",
+        r"\b(?:реши|решить|разбери|разобрать|объясни|сделай)\s+(?:задач[а-я]*\s*)?\d+",
+        r"\b(?:перв|втор|трет|четверт|пят|шест|седьм|восьм|девят|десят)[а-я]*\b",
+        r"\b(?:продолж|подробн|попроще|перепроверь|проверь ещё|объясни ещё)[а-я]*\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in references)
+
+
 def format_about_message(solved_tasks: int) -> str:
     return (
         "<b>О Student AI Bot</b>\n\n"
@@ -107,6 +123,9 @@ def format_start_message() -> str:
         "• Текстом - первый распознанный разбор бесплатный.\n"
         f"• Одной фотографией - {PHOTO_PRICE_STARS} Stars или {PHOTO_CREDITS} "
         "оплаченных попыток. Перед списанием я попрошу подтверждение.\n\n"
+        f"После фото я помню распознанные условия {PHOTO_SESSION_HOURS} часа. Можно попросить "
+        "сначала решить задачу 1, затем задачи 2 и 3 без повторной оплаты фото. "
+        "Сбросить контекст: /newtask\n\n"
         "Что будет в ответе:\n"
         "• решение по шагам;\n"
         "• проверка результата;\n"
@@ -150,7 +169,9 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Текст - до 6000 символов. Можно отправить одну фотографию задачи; перед обработкой "
         f"бот предупредит о цене и попросит подтверждение. Фоторазбор стоит {PHOTO_PRICE_STARS} "
         f"Stars или списывает {PHOTO_CREDITS} оплаченных попыток. PDF и другие файлы пока не "
-        "принимаются. Ответ AI стоит перепроверять.\n\n"
+        f"принимаются. Распознанные условия фото хранятся {PHOTO_SESSION_HOURS} часа; дальнейшие "
+        "просьбы решить другие номера с этого фото не требуют повторной оплаты. Новый контекст: "
+        "/newtask. Ответ AI стоит перепроверять.\n\n"
         "Где посмотреть остаток?\n/balance\n\n"
         "Где узнать больше о проекте?\n/about"
     )
@@ -382,6 +403,17 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(text)
 
 
+async def new_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _, db, _ = services(context)
+    context.user_data.pop("pending_photo", None)
+    removed = db.clear_photo_session(update.effective_user.id)
+    await update.message.reply_text(
+        "Контекст предыдущей фотографии удалён. Пришли новую задачу текстом или фотографией."
+        if removed else
+        "Активной фотографии в памяти нет. Пришли новую задачу текстом или фотографией."
+    )
+
+
 async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _, db, ai = services(context)
     text = (update.message.text or "").strip()
@@ -392,6 +424,30 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     user = update.effective_user
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+
+    session = db.photo_session(user.id, PHOTO_SESSION_HOURS)
+    if session and is_photo_followup(text):
+        try:
+            answer = await asyncio.to_thread(
+                ai.answer_photo_session, session.recognized_tasks, text, session.last_request
+            )
+            db.touch_photo_session(user.id, text)
+            db.log_request(
+                user.id, "photo_followup", answer.input_tokens, answer.output_tokens,
+                answer.estimated_cost_usd, "completed",
+            )
+            for part in split_message(answer.text, limit=3400):
+                await update.message.reply_text(
+                    markdown_to_telegram_html(part), parse_mode="HTML"
+                )
+        except Exception:
+            logger.exception("Photo follow-up failed for user %s", user.id)
+            db.log_request(user.id, "photo_followup", 0, 0, 0, "failed")
+            await update.message.reply_text(
+                "Не удалось продолжить разбор. Фото осталось в памяти - попробуй ещё раз."
+            )
+        return
+
     try:
         route = await asyncio.to_thread(ai.route, text)
     except Exception:
@@ -454,7 +510,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Фоторазбор - отдельная функция. Он стоит 100 Telegram Stars или списывает "
         f"{PHOTO_CREDITS} оплаченных попыток. Бесплатный первый разбор для фото не действует.\n\n"
         "После подтверждения я распознаю условие и решу задачу. Если цена кажется "
-        "завышенной или заниженной, напиши в поддержку: /paysupport.",
+        "завышенной или заниженной, напиши в поддержку: /paysupport.\n\n"
+        f"Распознанные условия сохранятся на {PHOTO_SESSION_HOURS} часа. В подписи можно "
+        "сразу написать: реши задачу 1. Потом задачи 2 и 3 можно запросить отдельным "
+        "сообщением без повторной оплаты фото.",
         reply_markup=keyboard,
     )
 
@@ -485,25 +544,50 @@ async def photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     await query.edit_message_text(
-        f"Принято. Списано попыток: {access.credits_charged}. Распознаю и решаю задачу…"
+        f"Принято. Списано попыток: {access.credits_charged}. Распознаю задачи..."
         if access.credits_charged else
-        "Принято. Для безлимитного доступа попытки не списываются. Распознаю и решаю задачу…"
+        "Принято. Для безлимитного доступа попытки не списываются. Распознаю задачи..."
     )
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    previous_session = db.photo_session(user.id, PHOTO_SESSION_HOURS)
     try:
         telegram_file = await context.bot.get_file(pending["file_id"])
         image_bytes = bytes(await telegram_file.download_as_bytearray())
-        answer = await asyncio.to_thread(ai.answer_image, image_bytes, pending["caption"])
+        extraction = await asyncio.to_thread(ai.extract_image_tasks, image_bytes)
+        db.save_photo_session(user.id, extraction.text)
+        caption = pending["caption"].strip()
+        if caption:
+            answer = await asyncio.to_thread(ai.answer_photo_session, extraction.text, caption)
+            db.touch_photo_session(user.id, caption)
+            input_tokens = extraction.input_tokens + answer.input_tokens
+            output_tokens = extraction.output_tokens + answer.output_tokens
+            estimated_cost = extraction.estimated_cost_usd + answer.estimated_cost_usd
+            response_text = answer.text
+            log_source = access.source
+        else:
+            input_tokens = extraction.input_tokens
+            output_tokens = extraction.output_tokens
+            estimated_cost = extraction.estimated_cost_usd
+            response_text = (
+                f"{extraction.text}\n\nФото сохранено на {PHOTO_SESSION_HOURS} часа. "
+                "Напиши, например: реши задачу 1. После ответа можно отдельно попросить "
+                "решить задачи 2 и 3 - повторно платить за фото не нужно."
+            )
+            log_source = "photo_setup"
         db.log_request(
-            user.id, access.source, answer.input_tokens, answer.output_tokens,
-            answer.estimated_cost_usd, "completed",
+            user.id, log_source, input_tokens, output_tokens, estimated_cost, "completed",
         )
-        for part in split_message(answer.text, limit=3400):
+        for part in split_message(response_text, limit=3400):
             await update.effective_message.reply_text(
                 markdown_to_telegram_html(part), parse_mode="HTML"
             )
     except Exception:
         logger.exception("Photo AI request failed for user %s", user.id)
+        if previous_session:
+            db.save_photo_session(user.id, previous_session.recognized_tasks)
+            db.touch_photo_session(user.id, previous_session.last_request)
+        else:
+            db.clear_photo_session(user.id)
         db.restore_access(user.id, access.source, access.credits_charged)
         db.log_request(user.id, access.source, 0, 0, 0, "failed")
         await update.effective_message.reply_text(
@@ -515,6 +599,7 @@ async def photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def post_init(application: Application) -> None:
     await application.bot.set_my_commands([
         BotCommand("start", "Как пользоваться"), BotCommand("balance", "Остаток разборов"),
+        BotCommand("newtask", "Сбросить контекст фото"),
         BotCommand("faq", "Частые вопросы"), BotCommand("buy", "Купить пакет"),
         BotCommand("referral", "Пригласить друга"),
         BotCommand("about", "О боте и открытом коде"),
@@ -549,6 +634,7 @@ def main() -> None:
     application.bot_data.update(settings=settings, db=db, ai=ai)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("balance", balance))
+    application.add_handler(CommandHandler("newtask", new_task))
     application.add_handler(CommandHandler("faq", faq))
     application.add_handler(CommandHandler("about", about))
     application.add_handler(CommandHandler("buy", buy))

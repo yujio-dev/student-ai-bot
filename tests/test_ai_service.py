@@ -80,6 +80,41 @@ class AIServiceImageTest(unittest.TestCase):
         continuation = responses.requests[1]["input"][-1]["content"][0]["text"]
         self.assertIn("Продолжи ровно с места остановки", continuation)
 
+    def test_extract_image_tasks_uses_extraction_prompt(self) -> None:
+        service = AIService.__new__(AIService)
+        responses = FakeResponses()
+        service.client = SimpleNamespace(responses=responses)
+        service.model = "test-model"
+        service.max_output_tokens = 500
+        service.input_rate = 1.0
+        service.output_rate = 2.0
+
+        service.extract_image_tasks(b"photo")
+
+        self.assertIn("Не решай задачи", responses.request["instructions"])
+        content = responses.request["input"][0]["content"]
+        self.assertEqual(content[1]["type"], "input_image")
+        self.assertEqual(content[1]["detail"], "high")
+
+    def test_photo_session_answer_contains_recognized_tasks_and_request(self) -> None:
+        service = AIService.__new__(AIService)
+        responses = FakeResponses()
+        service.client = SimpleNamespace(responses=responses)
+        service.model = "test-model"
+        service.max_output_tokens = 500
+        service.input_rate = 1.0
+        service.output_rate = 2.0
+
+        service.answer_photo_session(
+            "Задача 1: 2 + 2", "Объясни подробнее", "Реши задачу 1"
+        )
+
+        prompt = responses.request["input"][0]["content"][0]["text"]
+        self.assertIn("Задача 1: 2 + 2", prompt)
+        self.assertIn("Объясни подробнее", prompt)
+        self.assertIn("Предыдущий запрос в этой фото-сессии:\nРеши задачу 1", prompt)
+        self.assertIn("Не решай остальные номера", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

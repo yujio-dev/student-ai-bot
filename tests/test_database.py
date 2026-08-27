@@ -122,6 +122,33 @@ class DatabaseTest(unittest.TestCase):
             )
         self.assertNotIn(41, self.db.reactivation_candidates(3))
 
+    def test_photo_session_is_saved_replaced_and_cleared(self) -> None:
+        self.db.save_photo_session(60, "Задача 1")
+        session = self.db.photo_session(60)
+        self.assertIsNotNone(session)
+        self.assertEqual(session.recognized_tasks, "Задача 1")
+
+        self.db.save_photo_session(60, "Задача 2")
+        self.assertEqual(self.db.photo_session(60).recognized_tasks, "Задача 2")
+        self.db.touch_photo_session(60, "Реши задачу 2")
+        self.assertEqual(self.db.photo_session(60).last_request, "Реши задачу 2")
+        self.assertTrue(self.db.clear_photo_session(60))
+        self.assertIsNone(self.db.photo_session(60))
+
+    def test_expired_photo_session_is_removed(self) -> None:
+        self.db.save_photo_session(61, "Старое фото")
+        with self.db._connection() as connection:
+            connection.execute(
+                "UPDATE photo_sessions SET updated_at=datetime('now', '-25 hours') "
+                "WHERE telegram_id=61"
+            )
+        self.assertIsNone(self.db.photo_session(61, max_age_hours=24))
+
+    def test_photo_followups_count_as_completed_solutions(self) -> None:
+        self.db.log_request(62, "photo_setup", 10, 20, 0.01, "completed")
+        self.db.log_request(62, "photo_followup", 10, 20, 0.01, "completed")
+        self.assertEqual(self.db.solved_tasks_count(), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

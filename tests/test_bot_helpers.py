@@ -5,6 +5,7 @@ from app.bot import (
     GITHUB_URL,
     format_about_message,
     format_start_message,
+    is_photo_followup,
     markdown_to_telegram_html,
     split_message,
 )
@@ -35,6 +36,7 @@ class SplitMessageTest(unittest.TestCase):
         self.assertIn("Текстом - первый распознанный разбор бесплатный", rendered)
         self.assertIn("Одной фотографией - 100 Stars или 5", rendered)
         self.assertIn("/buy", rendered)
+        self.assertIn("/newtask", rendered)
         self.assertNotIn("—", rendered)
         self.assertNotIn("–", rendered)
 
@@ -60,6 +62,13 @@ class SplitMessageTest(unittest.TestCase):
         self.assertIn("1. **Дано**", INSTRUCTIONS)
         self.assertIn("исходные значения, условия, ограничения", INSTRUCTIONS)
         self.assertNotIn("Что пошло не так", INSTRUCTIONS)
+
+    def test_clear_photo_followups_are_detected(self) -> None:
+        self.assertTrue(is_photo_followup("Теперь реши задачу 2 и задачу 3"))
+        self.assertTrue(is_photo_followup("Разбери 2 и 3 задачи"))
+        self.assertTrue(is_photo_followup("Объясни вторую подробнее"))
+        self.assertTrue(is_photo_followup("Продолжи разбор"))
+        self.assertFalse(is_photo_followup("Привет, сколько стоит бот?"))
 
 
 if __name__ == "__main__":
