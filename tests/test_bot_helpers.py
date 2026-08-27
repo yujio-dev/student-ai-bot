@@ -56,6 +56,11 @@ class SplitMessageTest(unittest.TestCase):
         self.assertNotIn("—", prompts)
         self.assertNotIn("–", prompts)
 
+    def test_answer_format_starts_with_structured_given_data(self) -> None:
+        self.assertIn("1. **Дано**", INSTRUCTIONS)
+        self.assertIn("исходные значения, условия, ограничения", INSTRUCTIONS)
+        self.assertNotIn("Что пошло не так", INSTRUCTIONS)
+
 
 if __name__ == "__main__":
     unittest.main()

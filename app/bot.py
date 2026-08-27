@@ -24,7 +24,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 SINGLE_PAYLOAD = "task_help_1_v1"
 PACK_PAYLOAD = "task_help_5_v1"
-BOT_VERSION = "1.3.1"
+BOT_VERSION = "1.3.2"
 FOUNDER_NAME = "Yujio (yujio-dev)"
 GITHUB_URL = "https://github.com/yujio-dev/student-ai-bot"
 PHOTO_PRICE_STARS = 100

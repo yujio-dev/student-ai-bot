@@ -14,7 +14,11 @@ INSTRUCTIONS = """
 а помогай студенту понять ход решения и уверенно объяснить его преподавателю.
 
 Формат ответа:
-1. **Что пошло не так** - краткий диагноз и общая идея исправления.
+1. **Дано** - структурированно перечисли всю информацию, которую передал пользователь
+   и которая пригодится в решении: исходные значения, условия, ограничения, обозначения
+   и то, что требуется найти или сделать. Для фотографии сначала аккуратно распознай
+   условие. Не добавляй фактов, которых нет у пользователя. Если задач несколько,
+   раздели данные по номерам задач.
 2. **Решение** - вычисления, рассуждение, исправленный текст или полный рабочий код,
    в зависимости от предмета. Если исправляешь код, помести его в Markdown-блок и в
    конце каждой реально исправленной строки добавь короткий комментарий на языке
@@ -82,6 +86,71 @@ class AIService:
     def _cost(self, input_tokens: int, output_tokens: int) -> float:
         return (input_tokens * self.input_rate + output_tokens * self.output_rate) / 1_000_000
 
+    @staticmethod
+    def _incomplete_reason(response) -> str | None:
+        details = getattr(response, "incomplete_details", None)
+        if isinstance(details, dict):
+            return details.get("reason")
+        return getattr(details, "reason", None)
+
+    @staticmethod
+    def _output_items(response) -> list:
+        items = []
+        for item in getattr(response, "output", []) or []:
+            if hasattr(item, "model_dump"):
+                items.append(item.model_dump(exclude_none=True))
+            else:
+                items.append(item)
+        return items
+
+    def _complete_answer(self, input_items: list, min_output_tokens: int = 0) -> AIAnswer:
+        """Continue responses that stop only because they reached the output limit."""
+        history = list(input_items)
+        text_parts: list[str] = []
+        total_input_tokens = 0
+        total_output_tokens = 0
+        max_tokens = max(self.max_output_tokens, min_output_tokens)
+
+        for _ in range(4):
+            response = self.client.responses.create(
+                model=self.model,
+                instructions=INSTRUCTIONS,
+                input=history,
+                max_output_tokens=max_tokens,
+                reasoning={"effort": "low"},
+                text={"verbosity": "high"},
+                store=False,
+            )
+            text_parts.append(response.output_text)
+            if response.usage:
+                total_input_tokens += int(response.usage.input_tokens)
+                total_output_tokens += int(response.usage.output_tokens)
+
+            if not (
+                getattr(response, "status", "completed") == "incomplete"
+                and self._incomplete_reason(response) == "max_output_tokens"
+            ):
+                return AIAnswer(
+                    "".join(text_parts),
+                    total_input_tokens,
+                    total_output_tokens,
+                    self._cost(total_input_tokens, total_output_tokens),
+                )
+
+            history.extend(self._output_items(response))
+            history.append({
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": (
+                        "Продолжи ровно с места остановки. Не повторяй уже написанное. "
+                        "Обязательно доведи все задачи и все разделы ответа до конца."
+                    ),
+                }],
+            })
+
+        raise RuntimeError("AI response remained incomplete after automatic continuations")
+
     def route(self, message: str) -> RouteResult:
         """Decide whether a message is a billable academic task before consuming credit."""
         response = self.client.responses.create(
@@ -115,19 +184,10 @@ class AIService:
         )
 
     def answer(self, question: str) -> AIAnswer:
-        response = self.client.responses.create(
-            model=self.model,
-            instructions=INSTRUCTIONS,
-            input=question,
-            max_output_tokens=self.max_output_tokens,
-            reasoning={"effort": "low"},
-            text={"verbosity": "high"},
-            store=False,
-        )
-        input_tokens = int(response.usage.input_tokens if response.usage else 0)
-        output_tokens = int(response.usage.output_tokens if response.usage else 0)
-        cost = self._cost(input_tokens, output_tokens)
-        return AIAnswer(response.output_text, input_tokens, output_tokens, cost)
+        return self._complete_answer([{
+            "role": "user",
+            "content": [{"type": "input_text", "text": question}],
+        }])
 
     def answer_image(self, image_bytes: bytes, caption: str = "") -> AIAnswer:
         encoded = base64.b64encode(image_bytes).decode("ascii")
@@ -138,30 +198,14 @@ class AIService:
         )
         if caption.strip():
             prompt += f"\nКомментарий пользователя: {caption.strip()}"
-        response = self.client.responses.create(
-            model=self.model,
-            instructions=INSTRUCTIONS,
-            input=[{
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt},
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:image/jpeg;base64,{encoded}",
-                        "detail": "high",
-                    },
-                ],
-            }],
-            max_output_tokens=self.max_output_tokens,
-            reasoning={"effort": "low"},
-            text={"verbosity": "high"},
-            store=False,
-        )
-        input_tokens = int(response.usage.input_tokens if response.usage else 0)
-        output_tokens = int(response.usage.output_tokens if response.usage else 0)
-        return AIAnswer(
-            response.output_text,
-            input_tokens,
-            output_tokens,
-            self._cost(input_tokens, output_tokens),
-        )
+        return self._complete_answer([{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": prompt},
+                {
+                    "type": "input_image",
+                    "image_url": f"data:image/jpeg;base64,{encoded}",
+                    "detail": "high",
+                },
+            ],
+        }], min_output_tokens=4000)
