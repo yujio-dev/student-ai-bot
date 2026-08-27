@@ -4,11 +4,14 @@ from app.ai_service import INSTRUCTIONS, PRODUCT_CAPABILITIES
 from app.bot import (
     GITHUB_URL,
     format_about_message,
+    feedback_keyboard,
+    format_funnel_message,
     format_start_message,
     is_photo_followup,
     markdown_to_telegram_html,
     split_message,
 )
+from app.database import FunnelStats
 
 
 class SplitMessageTest(unittest.TestCase):
@@ -33,10 +36,17 @@ class SplitMessageTest(unittest.TestCase):
 
     def test_start_message_explains_text_and_photo_tasks(self) -> None:
         rendered = format_start_message()
-        self.assertIn("Текстом - первый распознанный разбор бесплатный", rendered)
-        self.assertIn("Одной фотографией - 100 Stars или 5", rendered)
+        self.assertIn("Пришли текст или фото реальной учебной задачи", rendered)
+        self.assertIn("Первая задача бесплатна", rendered)
+        self.assertIn("Пошаговый разбор", rendered)
+        self.assertIn("Проверка результата", rendered)
+        self.assertIn("Объяснение для защиты", rendered)
+        self.assertIn("/faq", rendered)
+        self.assertIn("/balance", rendered)
         self.assertIn("/buy", rendered)
-        self.assertIn("/newtask", rendered)
+        self.assertNotIn("24", rendered)
+        self.assertNotIn("100 Stars", rendered)
+        self.assertNotIn("/newtask", rendered)
         self.assertNotIn("—", rendered)
         self.assertNotIn("–", rendered)
 
@@ -68,7 +78,24 @@ class SplitMessageTest(unittest.TestCase):
         self.assertTrue(is_photo_followup("Разбери 2 и 3 задачи"))
         self.assertTrue(is_photo_followup("Объясни вторую подробнее"))
         self.assertTrue(is_photo_followup("Продолжи разбор"))
+        self.assertTrue(is_photo_followup("Объясни для защиты"))
         self.assertFalse(is_photo_followup("Привет, сколько стоит бот?"))
+
+    def test_feedback_keyboard_contains_compact_callbacks(self) -> None:
+        keyboard = feedback_keyboard(123)
+        callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+        self.assertEqual(callbacks, [
+            "feedback:123:positive", "feedback:123:negative", "defense:123"
+        ])
+
+    def test_funnel_message_shows_zeros_and_conversions(self) -> None:
+        stats = FunnelStats(10, 5, 4, 2, 1, 1, 2, 125, 3, 1)
+        rendered = format_funnel_message(stats, 7)
+        self.assertIn("Уникальные старты: <b>10</b>", rendered)
+        self.assertIn("50.0% от стартов", rendered)
+        self.assertIn("Заработано: <b>125 Stars</b>", rendered)
+        empty = format_funnel_message(FunnelStats(*(0 for _ in range(10))), 1)
+        self.assertIn("0%", empty)
 
 
 if __name__ == "__main__":

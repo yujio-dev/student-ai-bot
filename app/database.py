@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -38,6 +39,24 @@ class PhotoSession:
     last_request: str
     created_at: str
     updated_at: str
+    access_source: str
+
+
+@dataclass(frozen=True)
+class FunnelStats:
+    starts: int
+    task_submitters: int
+    answer_users: int
+    buy_users: int
+    invoice_users: int
+    buyers: int
+    payments: int
+    stars: int
+    feedback_positive: int
+    feedback_negative: int
+
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -117,9 +136,24 @@ class Database:
                     telegram_id INTEGER PRIMARY KEY,
                     recognized_tasks TEXT NOT NULL,
                     last_request TEXT NOT NULL DEFAULT '',
+                    access_source TEXT NOT NULL DEFAULT 'photo_paid',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_id INTEGER NOT NULL,
+                    event_name TEXT NOT NULL,
+                    source TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_events_name_created
+                    ON events(event_name, created_at);
+                CREATE INDEX IF NOT EXISTS idx_events_user_created
+                    ON events(telegram_id, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_events_one_feedback_per_answer
+                    ON events(telegram_id, source)
+                    WHERE event_name IN ('feedback_positive', 'feedback_negative');
                 """
             )
             columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
@@ -133,6 +167,11 @@ class Database:
             if "last_request" not in photo_columns:
                 db.execute(
                     "ALTER TABLE photo_sessions ADD COLUMN last_request TEXT NOT NULL DEFAULT ''"
+                )
+            if "access_source" not in photo_columns:
+                db.execute(
+                    "ALTER TABLE photo_sessions ADD COLUMN access_source TEXT NOT NULL "
+                    "DEFAULT 'photo_paid'"
                 )
 
     def ensure_user(self, telegram_id: int, username: str | None) -> bool:
@@ -210,6 +249,25 @@ class Database:
             if row["credits"] > 0:
                 db.execute("UPDATE users SET credits=credits-1 WHERE telegram_id=?", (telegram_id,))
                 return Access(True, "paid", 1)
+            return Access(False)
+
+    def claim_trial_access(self, telegram_id: int, username: str | None) -> Access:
+        """Atomically consume only the shared trial, never falling back to paid credits."""
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """INSERT INTO users (telegram_id, username) VALUES (?, ?)
+                ON CONFLICT(telegram_id) DO UPDATE SET username=COALESCE(excluded.username, users.username)""",
+                (telegram_id, username),
+            )
+            row = db.execute(
+                "SELECT trial_used, unlimited FROM users WHERE telegram_id=?", (telegram_id,)
+            ).fetchone()
+            if row["unlimited"]:
+                return Access(True, "unlimited")
+            if not row["trial_used"]:
+                db.execute("UPDATE users SET trial_used=1 WHERE telegram_id=?", (telegram_id,))
+                return Access(True, "trial")
             return Access(False)
 
     def claim_paid_credits(
@@ -405,33 +463,115 @@ class Database:
     def log_request(
         self, telegram_id: int, source: str, input_tokens: int, output_tokens: int,
         estimated_cost_usd: float, status: str,
-    ) -> None:
+    ) -> int:
         with self._connection() as db:
-            db.execute(
+            cursor = db.execute(
                 """INSERT INTO requests
                 (telegram_id, access_source, input_tokens, output_tokens, estimated_cost_usd, status)
                 VALUES (?, ?, ?, ?, ?, ?)""",
                 (telegram_id, source, input_tokens, output_tokens, estimated_cost_usd, status),
             )
+            return int(cursor.lastrowid)
 
-    def save_photo_session(self, telegram_id: int, recognized_tasks: str) -> None:
+    def log_event(
+        self, telegram_id: int, event_name: str, source: str | None = None,
+    ) -> bool:
+        """Best-effort analytics that must never break the user-facing flow."""
+        try:
+            with self._connection() as db:
+                db.execute(
+                    "INSERT INTO events (telegram_id, event_name, source) VALUES (?, ?, ?)",
+                    (telegram_id, event_name, source),
+                )
+            return True
+        except Exception:
+            logger.exception("Could not log analytics event %s", event_name)
+            return False
+
+    def record_feedback(self, telegram_id: int, request_id: int, positive: bool) -> bool:
+        """Record at most one positive or negative vote for a completed answer."""
+        event_name = "feedback_positive" if positive else "feedback_negative"
+        try:
+            with self._connection() as db:
+                owned_request = db.execute(
+                    "SELECT 1 FROM requests WHERE id=? AND telegram_id=? AND status='completed'",
+                    (request_id, telegram_id),
+                ).fetchone()
+                if not owned_request:
+                    return False
+                cursor = db.execute(
+                    "INSERT OR IGNORE INTO events (telegram_id, event_name, source) "
+                    "VALUES (?, ?, ?)",
+                    (telegram_id, event_name, str(request_id)),
+                )
+                return cursor.rowcount == 1
+        except Exception:
+            logger.exception("Could not record feedback for request %s", request_id)
+            return False
+
+    def funnel_stats(self, days: int = 7) -> FunnelStats:
+        if days not in (1, 7, 30):
+            raise ValueError("days must be 1, 7, or 30")
+        threshold = f"-{days} days"
+        with self._connection() as db:
+            event_rows = db.execute(
+                """SELECT event_name, COUNT(*) AS events,
+                COUNT(DISTINCT telegram_id) AS users
+                FROM events WHERE created_at >= datetime('now', ?)
+                GROUP BY event_name""",
+                (threshold,),
+            ).fetchall()
+            events = {
+                str(row["event_name"]): (int(row["events"]), int(row["users"]))
+                for row in event_rows
+            }
+            task_submitters = db.execute(
+                """SELECT COUNT(DISTINCT telegram_id) AS count FROM events
+                WHERE event_name IN ('text_task_submitted', 'photo_submitted')
+                  AND created_at >= datetime('now', ?)""",
+                (threshold,),
+            ).fetchone()
+            payment = db.execute(
+                """SELECT COUNT(DISTINCT telegram_id) AS buyers,
+                COUNT(*) AS payments, COALESCE(SUM(stars), 0) AS stars
+                FROM payments WHERE created_at >= datetime('now', ?)""",
+                (threshold,),
+            ).fetchone()
+        return FunnelStats(
+            starts=events.get("start", (0, 0))[1],
+            task_submitters=int(task_submitters["count"]),
+            answer_users=events.get("answer_completed", (0, 0))[1],
+            buy_users=events.get("buy_opened", (0, 0))[1],
+            invoice_users=events.get("invoice_requested", (0, 0))[1],
+            buyers=int(payment["buyers"]),
+            payments=int(payment["payments"]),
+            stars=int(payment["stars"]),
+            feedback_positive=events.get("feedback_positive", (0, 0))[0],
+            feedback_negative=events.get("feedback_negative", (0, 0))[0],
+        )
+
+    def save_photo_session(
+        self, telegram_id: int, recognized_tasks: str, access_source: str = "photo_paid",
+    ) -> None:
         with self._connection() as db:
             db.execute(
-                """INSERT INTO photo_sessions (telegram_id, recognized_tasks)
-                VALUES (?, ?)
+                """INSERT INTO photo_sessions (telegram_id, recognized_tasks, access_source)
+                VALUES (?, ?, ?)
                 ON CONFLICT(telegram_id) DO UPDATE SET
                     recognized_tasks=excluded.recognized_tasks,
                     last_request='',
+                    access_source=excluded.access_source,
                     created_at=CURRENT_TIMESTAMP,
                     updated_at=CURRENT_TIMESTAMP""",
-                (telegram_id, recognized_tasks),
+                (telegram_id, recognized_tasks, access_source),
             )
 
     def photo_session(self, telegram_id: int, max_age_hours: int = 24) -> PhotoSession | None:
         threshold = f"-{max_age_hours} hours"
         with self._connection() as db:
             row = db.execute(
-                """SELECT telegram_id, recognized_tasks, last_request, created_at, updated_at
+                """SELECT telegram_id, recognized_tasks, last_request, created_at, updated_at,
+                access_source
                 FROM photo_sessions
                 WHERE telegram_id=? AND updated_at >= datetime('now', ?)""",
                 (telegram_id, threshold),
@@ -441,7 +581,7 @@ class Database:
                 return None
         return PhotoSession(
             int(row["telegram_id"]), str(row["recognized_tasks"]), str(row["last_request"]),
-            str(row["created_at"]), str(row["updated_at"]),
+            str(row["created_at"]), str(row["updated_at"]), str(row["access_source"]),
         )
 
     def touch_photo_session(self, telegram_id: int, last_request: str = "") -> None:

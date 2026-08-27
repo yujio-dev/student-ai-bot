@@ -15,7 +15,7 @@ from telegram.ext import (
 
 from app.ai_service import AIService
 from app.config import Settings, load_settings
-from app.database import Database
+from app.database import Database, FunnelStats
 
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -24,7 +24,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 SINGLE_PAYLOAD = "task_help_1_v1"
 PACK_PAYLOAD = "task_help_5_v1"
-BOT_VERSION = "1.4.0"
+BOT_VERSION = "1.5.0"
 FOUNDER_NAME = "Yujio (yujio-dev)"
 GITHUB_URL = "https://github.com/yujio-dev/student-ai-bot"
 PHOTO_PRICE_STARS = 100
@@ -99,6 +99,7 @@ def is_photo_followup(text: str) -> bool:
         r"\b(?:реши|решить|разбери|разобрать|объясни|сделай)\s+(?:задач[а-я]*\s*)?\d+",
         r"\b(?:перв|втор|трет|четверт|пят|шест|седьм|восьм|девят|десят)[а-я]*\b",
         r"\b(?:продолж|подробн|попроще|перепроверь|проверь ещё|объясни ещё)[а-я]*\b",
+        r"\b(?:для|к|на)\s+защит[а-я]*\b",
     )
     return any(re.search(pattern, normalized) for pattern in references)
 
@@ -117,23 +118,102 @@ def format_about_message(solved_tasks: int) -> str:
 
 def format_start_message() -> str:
     return (
-        "Привет! Я помогу разобрать учебную задачу и подготовить понятное объяснение "
-        "для защиты.\n\n"
-        "Как отправить задачу:\n"
-        "• Текстом - первый распознанный разбор бесплатный.\n"
-        f"• Одной фотографией - {PHOTO_PRICE_STARS} Stars или {PHOTO_CREDITS} "
-        "оплаченных попыток. Перед списанием я попрошу подтверждение.\n\n"
-        f"После фото я помню распознанные условия {PHOTO_SESSION_HOURS} часа. Можно попросить "
-        "сначала решить задачу 1, затем задачи 2 и 3 без повторной оплаты фото. "
-        "Сбросить контекст: /newtask\n\n"
-        "Что будет в ответе:\n"
-        "• решение по шагам;\n"
-        "• проверка результата;\n"
-        "• объяснение, которое можно использовать на защите.\n\n"
-        "Баланс: /balance\n"
-        "Купить попытки: /buy\n"
-        "Все возможности и ограничения: /faq"
+        "Пришли текст или фото реальной учебной задачи. Я разберу решение по шагам, "
+        "проверю результат и помогу подготовить объяснение для защиты.\n\n"
+        "Первая задача бесплатна.\n\n"
+        "• Пошаговый разбор\n"
+        "• Проверка результата\n"
+        "• Объяснение для защиты\n\n"
+        "Подробнее: /faq  •  Баланс: /balance  •  Купить: /buy"
     )
+
+
+def conversion_percent(current: int, previous: int) -> str:
+    return "0%" if previous <= 0 else f"{current / previous * 100:.1f}%"
+
+
+def format_funnel_message(stats: FunnelStats, days: int) -> str:
+    return (
+        f"<b>Воронка за последние {days} дн.</b>\n\n"
+        f"Уникальные старты: <b>{stats.starts}</b>\n"
+        f"Отправили задачу: <b>{stats.task_submitters}</b> "
+        f"({conversion_percent(stats.task_submitters, stats.starts)} от стартов)\n"
+        f"Получили ответ: <b>{stats.answer_users}</b> "
+        f"({conversion_percent(stats.answer_users, stats.task_submitters)} от задач)\n"
+        f"Открыли покупку: <b>{stats.buy_users}</b> "
+        f"({conversion_percent(stats.buy_users, stats.answer_users)} от ответов)\n"
+        f"Запросили инвойс: <b>{stats.invoice_users}</b> "
+        f"({conversion_percent(stats.invoice_users, stats.buy_users)} от покупок)\n"
+        f"Уникальные покупатели: <b>{stats.buyers}</b> "
+        f"({conversion_percent(stats.buyers, stats.invoice_users)} от инвойсов)\n\n"
+        f"Платежей: <b>{stats.payments}</b>\n"
+        f"Заработано: <b>{stats.stars} Stars</b>\n"
+        f"Отзывы: 👍 {stats.feedback_positive}  👎 {stats.feedback_negative}"
+    )
+
+
+def feedback_keyboard(request_id: int, feedback_enabled: bool = True) -> InlineKeyboardMarkup:
+    rows = []
+    if feedback_enabled:
+        rows.append([
+            InlineKeyboardButton("👍 Помогло", callback_data=f"feedback:{request_id}:positive"),
+            InlineKeyboardButton("👎 Не помогло", callback_data=f"feedback:{request_id}:negative"),
+        ])
+    rows.append([InlineKeyboardButton(
+        "🎓 Объяснение для защиты", callback_data=f"defense:{request_id}"
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+def photo_paid_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"Подтвердить - {PHOTO_CREDITS} попыток", callback_data="photo:confirm"
+        )],
+        [InlineKeyboardButton("Отмена", callback_data="photo:cancel")],
+    ])
+
+
+def remember_answer_context(
+    context: ContextTypes.DEFAULT_TYPE, request_id: int, task_context: str, answer_text: str,
+) -> None:
+    contexts = context.user_data.setdefault("answer_contexts", {})
+    contexts[str(request_id)] = {
+        "task": task_context[:12000],
+        "answer": answer_text[:24000],
+        "defense": None,
+    }
+    while len(contexts) > 5:
+        contexts.pop(next(iter(contexts)))
+
+
+async def send_completed_answer(
+    message, context: ContextTypes.DEFAULT_TYPE, telegram_id: int, request_id: int,
+    answer_text: str, task_context: str, show_trial_cta: bool = False,
+) -> None:
+    remember_answer_context(context, request_id, task_context, answer_text)
+    parts = split_message(answer_text, limit=3400)
+    for index, part in enumerate(parts):
+        await message.reply_text(
+            markdown_to_telegram_html(part),
+            parse_mode="HTML",
+            reply_markup=feedback_keyboard(request_id) if index == len(parts) - 1 else None,
+        )
+    _, db, _ = services(context)
+    db.log_event(telegram_id, "answer_completed")
+    if show_trial_cta:
+        settings, _, _ = services(context)
+        try:
+            await message.reply_text(
+                "Если понадобится разобрать следующую задачу: "
+                f"1 разбор - {settings.single_price_stars} Stars, пакет из "
+                f"{settings.pack_credits} - {settings.pack_price_stars} Stars.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Купить следующий разбор", callback_data="buy:open")
+                ]]),
+            )
+        except Exception:
+            logger.exception("Could not send post-trial purchase CTA to user %s", telegram_id)
 
 
 def services(context: ContextTypes.DEFAULT_TYPE) -> tuple[Settings, Database, AIService]:
@@ -145,8 +225,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _, db, _ = services(context)
     user = update.effective_user
     is_new_user = db.ensure_user(user.id, user.username)
+    db.log_event(user.id, "start")
     if is_new_user and context.args and context.args[0].startswith("ref_"):
-        db.attach_referral(user.id, context.args[0][4:].upper())
+        if db.attach_referral(user.id, context.args[0][4:].upper()):
+            db.log_event(user.id, "referral_attached", context.args[0][4:].upper())
     await update.message.reply_text(format_start_message())
 
 
@@ -158,8 +240,9 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Разбирает текстовые учебные задачи по разным предметам, объясняет ход решения, "
         "помогает проверить результат и подготовиться к защите.\n\n"
         "Что расходует попытку?\n"
-        "Только сообщение, распознанное как конкретная учебная задача. Приветствия и "
-        "вопросы о самом боте попытку не списывают.\n\n"
+        "Первая распознанная учебная задача бесплатна независимо от того, отправлена она "
+        "текстом или фотографией. Это одна общая попытка. Приветствия и вопросы о самом "
+        "боте попытку не списывают.\n\n"
         "Сколько стоит?\n"
         f"Первый разбор бесплатный. Один дополнительный разбор стоит "
         f"{settings.single_price_stars} Stars. Выгодный пакет: {settings.pack_credits} "
@@ -167,8 +250,9 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"{settings.single_price_stars * settings.pack_credits}. Купить: /buy\n\n"
         "Какие ограничения?\n"
         "Текст - до 6000 символов. Можно отправить одну фотографию задачи; перед обработкой "
-        f"бот предупредит о цене и попросит подтверждение. Фоторазбор стоит {PHOTO_PRICE_STARS} "
-        f"Stars или списывает {PHOTO_CREDITS} оплаченных попыток. PDF и другие файлы пока не "
+        "бот попросит подтверждение. Первая общая попытка делает фоторазбор бесплатным. После "
+        f"её использования фоторазбор стоит {PHOTO_PRICE_STARS} Stars или списывает "
+        f"{PHOTO_CREDITS} оплаченных попыток. PDF и другие файлы пока не "
         f"принимаются. Распознанные условия фото хранятся {PHOTO_SESSION_HOURS} часа; дальнейшие "
         "просьбы решить другие номера с этого фото не требуют повторной оплаты. Новый контекст: "
         "/newtask. Ответ AI стоит перепроверять.\n\n"
@@ -197,7 +281,8 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    settings, _, _ = services(context)
+    settings, db, _ = services(context)
+    db.log_event(update.effective_user.id, "buy_opened")
     regular_pack_price = settings.single_price_stars * settings.pack_credits
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(
@@ -217,7 +302,7 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def send_product_invoice(
     update: Update, context: ContextTypes.DEFAULT_TYPE, product: str
 ) -> None:
-    settings, _, _ = services(context)
+    settings, db, _ = services(context)
     if product == "1":
         credits, stars, payload = 1, settings.single_price_stars, SINGLE_PAYLOAD
         title = "1 разбор учебной задачи"
@@ -229,6 +314,7 @@ async def send_product_invoice(
             f"По одному: {settings.single_price_stars * credits} Stars. "
             f"Цена пакета: {stars} Stars."
         )
+    db.log_event(update.effective_user.id, "invoice_requested", product)
     await context.bot.send_invoice(
         chat_id=update.effective_chat.id,
         title=title,
@@ -243,7 +329,11 @@ async def send_product_invoice(
 async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    await send_product_invoice(update, context, query.data.split(":", 1)[1])
+    product = query.data.split(":", 1)[1]
+    if product == "open":
+        await buy(update, context)
+    else:
+        await send_product_invoice(update, context, product)
 
 
 async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -276,6 +366,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         payment.total_amount, credits, settings.referral_reward_credits,
     )
     if result.added:
+        db.log_event(update.effective_user.id, "payment_completed", payment.invoice_payload)
         await update.message.reply_text(
             f"Оплата получена. Добавлено разборов: {credits}. Пришли учебную задачу."
         )
@@ -288,6 +379,20 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
             except Exception:
                 logger.exception("Could not notify referrer %s", result.rewarded_referrer_id)
+
+
+async def funnel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings, db, _ = services(context)
+    if update.effective_user.id != settings.owner_telegram_id:
+        await update.message.reply_text("Команда доступна только владельцу бота.")
+        return
+    if len(context.args) > 1 or (context.args and context.args[0] not in {"1", "7", "30"}):
+        await update.message.reply_text("Формат: /funnel 1, /funnel 7 или /funnel 30")
+        return
+    days = int(context.args[0]) if context.args else 7
+    await update.message.reply_text(
+        format_funnel_message(db.funnel_stats(days), days), parse_mode="HTML"
+    )
 
 
 async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -432,17 +537,19 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 ai.answer_photo_session, session.recognized_tasks, text, session.last_request
             )
             db.touch_photo_session(user.id, text)
-            db.log_request(
+            request_id = db.log_request(
                 user.id, "photo_followup", answer.input_tokens, answer.output_tokens,
                 answer.estimated_cost_usd, "completed",
             )
-            for part in split_message(answer.text, limit=3400):
-                await update.message.reply_text(
-                    markdown_to_telegram_html(part), parse_mode="HTML"
-                )
+            await send_completed_answer(
+                update.message, context, user.id, request_id, answer.text,
+                f"{session.recognized_tasks}\n\nЗапрос: {text}",
+                show_trial_cta=session.access_source == "trial" and not session.last_request,
+            )
         except Exception:
             logger.exception("Photo follow-up failed for user %s", user.id)
             db.log_request(user.id, "photo_followup", 0, 0, 0, "failed")
+            db.log_event(user.id, "answer_failed", "photo_followup")
             await update.message.reply_text(
                 "Не удалось продолжить разбор. Фото осталось в памяти - попробуй ещё раз."
             )
@@ -452,6 +559,7 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         route = await asyncio.to_thread(ai.route, text)
     except Exception:
         logger.exception("Routing request failed for user %s", user.id)
+        db.log_event(user.id, "answer_failed", "routing")
         await update.message.reply_text("Не удалось распознать сообщение. Попробуй ещё раз позже.")
         return
 
@@ -461,6 +569,7 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(markdown_to_telegram_html(route.reply), parse_mode="HTML")
         return
 
+    db.log_event(user.id, "text_task_submitted")
     access = db.claim_access(user.id, user.username)
     if not access.allowed:
         db.log_request(user.id, "routing", route.input_tokens, route.output_tokens,
@@ -470,59 +579,79 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     try:
         answer = await asyncio.to_thread(ai.answer, text)
-        db.log_request(
+        request_id = db.log_request(
             user.id, access.source,
             route.input_tokens + answer.input_tokens,
             route.output_tokens + answer.output_tokens,
             route.estimated_cost_usd + answer.estimated_cost_usd,
             "completed",
         )
-        for part in split_message(answer.text, limit=3400):
-            await update.message.reply_text(
-                markdown_to_telegram_html(part), parse_mode="HTML"
-            )
+        await send_completed_answer(
+            update.message, context, user.id, request_id, answer.text, text,
+            show_trial_cta=access.source == "trial",
+        )
     except Exception:
         logger.exception("AI request failed for user %s", user.id)
         db.restore_access(user.id, access.source, access.credits_charged)
         db.log_request(user.id, access.source, 0, 0, 0, "failed")
+        db.log_event(user.id, "answer_failed", access.source)
         await update.message.reply_text(
             "Не удалось получить ответ. Бесплатный разбор или кредит возвращён - попробуй позже."
         )
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _, db, _ = services(context)
+    user = update.effective_user
     photo = update.message.photo[-1]
     if photo.file_size and photo.file_size > 10 * 1024 * 1024:
         await update.message.reply_text("Фото слишком большое. Пришли изображение до 10 МБ.")
         return
+    db.log_event(user.id, "photo_submitted")
+    trial_available, _ = db.balance(user.id)
+    unlimited = db.has_unlimited_access(user.id)
     context.user_data["pending_photo"] = {
         "file_id": photo.file_id,
         "caption": (update.message.caption or "").strip()[:2000],
+        "trial_offer": trial_available or unlimited,
     }
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            f"Подтвердить - {PHOTO_CREDITS} попыток",
-            callback_data="photo:confirm",
-        )],
-        [InlineKeyboardButton("Отмена", callback_data="photo:cancel")],
-    ])
-    await update.message.reply_text(
-        "Фоторазбор - отдельная функция. Он стоит 100 Telegram Stars или списывает "
-        f"{PHOTO_CREDITS} оплаченных попыток. Бесплатный первый разбор для фото не действует.\n\n"
-        "После подтверждения я распознаю условие и решу задачу. Если цена кажется "
-        "завышенной или заниженной, напиши в поддержку: /paysupport.\n\n"
-        f"Распознанные условия сохранятся на {PHOTO_SESSION_HOURS} часа. В подписи можно "
-        "сразу написать: реши задачу 1. Потом задачи 2 и 3 можно запросить отдельным "
-        "сообщением без повторной оплаты фото.",
-        reply_markup=keyboard,
-    )
+    if trial_available or unlimited:
+        label = "Подтвердить" if unlimited else "Подтвердить бесплатный разбор"
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton(label, callback_data="photo:confirm")],
+            [InlineKeyboardButton("Отмена", callback_data="photo:cancel")],
+        ])
+        offer_text = (
+            "Для безлимитного доступа фоторазбор не списывает попытки."
+            if unlimited else
+            "Этот первый фоторазбор бесплатный. После подтверждения будет использована "
+            "твоя единая бесплатная попытка."
+        )
+        await update.message.reply_text(
+            f"{offer_text}\n\n"
+            f"Распознанные условия сохранятся на {PHOTO_SESSION_HOURS} часа, поэтому другие "
+            "задачи с этого же фото можно будет разобрать без повторного списания.",
+            reply_markup=keyboard,
+        )
+    else:
+        db.log_event(user.id, "photo_price_shown", "paid")
+        await update.message.reply_text(
+            "Фоторазбор стоит 100 Telegram Stars или списывает "
+            f"{PHOTO_CREDITS} оплаченных попыток.\n\n"
+            f"Распознанные условия сохранятся на {PHOTO_SESSION_HOURS} часа. Другие задачи "
+            "с этого же фото можно будет разобрать без повторной оплаты.",
+            reply_markup=photo_paid_keyboard(),
+        )
 
 
 async def photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     if query.data == "photo:cancel":
-        context.user_data.pop("pending_photo", None)
+        pending = context.user_data.pop("pending_photo", None)
+        if pending:
+            _, db, _ = services(context)
+            db.log_event(update.effective_user.id, "photo_cancelled")
         await query.edit_message_text("Фоторазбор отменён. Попытки не списаны.")
         return
 
@@ -533,8 +662,24 @@ async def photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     _, db, ai = services(context)
     user = update.effective_user
-    access = db.claim_paid_credits(user.id, user.username, PHOTO_CREDITS, "photo_paid")
+    offer_source = "trial" if pending.get("trial_offer") else "paid"
+    db.log_event(user.id, "photo_confirmed", offer_source)
+    access = (
+        db.claim_trial_access(user.id, user.username)
+        if pending.get("trial_offer") else
+        db.claim_paid_credits(user.id, user.username, PHOTO_CREDITS, "photo_paid")
+    )
     if not access.allowed:
+        if pending.get("trial_offer"):
+            pending["trial_offer"] = False
+            context.user_data["pending_photo"] = pending
+            db.log_event(user.id, "photo_price_shown", "trial_already_used")
+            await query.edit_message_text(
+                "Бесплатная попытка уже использована. Фоторазбор стоит 100 Stars или "
+                f"{PHOTO_CREDITS} оплаченных попыток.",
+                reply_markup=photo_paid_keyboard(),
+            )
+            return
         _, credits = db.balance(user.id)
         await query.edit_message_text(
             f"Для фоторазбора нужно {PHOTO_CREDITS} оплаченных попыток, сейчас доступно: "
@@ -546,7 +691,9 @@ async def photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.edit_message_text(
         f"Принято. Списано попыток: {access.credits_charged}. Распознаю задачи..."
         if access.credits_charged else
-        "Принято. Для безлимитного доступа попытки не списываются. Распознаю задачи..."
+        ("Принято. Использована бесплатная попытка. Распознаю задачи..."
+         if access.source == "trial" else
+         "Принято. Для безлимитного доступа попытки не списываются. Распознаю задачи...")
     )
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
     previous_session = db.photo_session(user.id, PHOTO_SESSION_HOURS)
@@ -554,7 +701,7 @@ async def photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         telegram_file = await context.bot.get_file(pending["file_id"])
         image_bytes = bytes(await telegram_file.download_as_bytearray())
         extraction = await asyncio.to_thread(ai.extract_image_tasks, image_bytes)
-        db.save_photo_session(user.id, extraction.text)
+        db.save_photo_session(user.id, extraction.text, access.source)
         caption = pending["caption"].strip()
         if caption:
             answer = await asyncio.to_thread(ai.answer_photo_session, extraction.text, caption)
@@ -574,25 +721,112 @@ async def photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "решить задачи 2 и 3 - повторно платить за фото не нужно."
             )
             log_source = "photo_setup"
-        db.log_request(
+        request_id = db.log_request(
             user.id, log_source, input_tokens, output_tokens, estimated_cost, "completed",
         )
-        for part in split_message(response_text, limit=3400):
-            await update.effective_message.reply_text(
-                markdown_to_telegram_html(part), parse_mode="HTML"
+        if caption:
+            await send_completed_answer(
+                update.effective_message, context, user.id, request_id, response_text,
+                f"{extraction.text}\n\nЗапрос: {caption}",
+                show_trial_cta=access.source == "trial",
             )
+        else:
+            for part in split_message(response_text, limit=3400):
+                await update.effective_message.reply_text(
+                    markdown_to_telegram_html(part), parse_mode="HTML"
+                )
+            db.log_event(user.id, "answer_completed", "photo_setup")
     except Exception:
         logger.exception("Photo AI request failed for user %s", user.id)
         if previous_session:
-            db.save_photo_session(user.id, previous_session.recognized_tasks)
+            db.save_photo_session(
+                user.id, previous_session.recognized_tasks, previous_session.access_source
+            )
             db.touch_photo_session(user.id, previous_session.last_request)
         else:
             db.clear_photo_session(user.id)
         db.restore_access(user.id, access.source, access.credits_charged)
         db.log_request(user.id, access.source, 0, 0, 0, "failed")
+        db.log_event(user.id, "answer_failed", access.source)
         await update.effective_message.reply_text(
-            f"Не удалось обработать фото. Все {PHOTO_CREDITS} попыток возвращены - "
-            "пришли фотографию ещё раз."
+            ("Не удалось обработать фото. Бесплатная попытка восстановлена - пришли "
+             "фотографию ещё раз."
+             if access.source == "trial" else
+             ("Не удалось обработать фото. Попытки не списывались - пришли фотографию "
+              "ещё раз."
+              if access.source == "unlimited" else
+             f"Не удалось обработать фото. Все {access.credits_charged or PHOTO_CREDITS} "
+             "попыток возвращены - пришли фотографию ещё раз."))
+        )
+
+
+async def feedback_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    _, request_id_text, value = query.data.split(":", 2)
+    request_id = int(request_id_text)
+    _, db, _ = services(context)
+    added = db.record_feedback(
+        update.effective_user.id, request_id, positive=value == "positive"
+    )
+    if not added:
+        await query.answer("Отзыв уже учтён")
+        return
+    await query.answer("Спасибо за отзыв!")
+    with suppress(Exception):
+        await query.edit_message_reply_markup(
+            reply_markup=feedback_keyboard(request_id, feedback_enabled=False)
+        )
+    if value == "positive":
+        await update.effective_message.reply_text(
+            "Спасибо! Если появится следующая задача - /buy. Пригласить друга: /referral"
+        )
+    else:
+        await update.effective_message.reply_text(
+            "Спасибо, это важно. Если ответ содержит ошибку, напиши в /paysupport."
+        )
+
+
+async def defense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    request_id = int(query.data.split(":", 1)[1])
+    answer_context = context.user_data.get("answer_contexts", {}).get(str(request_id))
+    if not answer_context:
+        await update.effective_message.reply_text(
+            "Контекст этого ответа уже недоступен после перезапуска, кнопка ничего не "
+            "списала. Для активной фото-сессии напиши «объясни для защиты» - это не требует "
+            "новой попытки. Обычную текстовую задачу придётся прислать заново."
+        )
+        return
+    if answer_context.get("defense"):
+        for part in split_message(answer_context["defense"], limit=3400):
+            await update.effective_message.reply_text(
+                markdown_to_telegram_html(part), parse_mode="HTML"
+            )
+        return
+
+    _, db, ai = services(context)
+    user = update.effective_user
+    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    try:
+        answer = await asyncio.to_thread(
+            ai.defense_explanation, answer_context["task"], answer_context["answer"]
+        )
+        answer_context["defense"] = answer.text
+        db.log_request(
+            user.id, "defense_followup", answer.input_tokens, answer.output_tokens,
+            answer.estimated_cost_usd, "completed",
+        )
+        for part in split_message(answer.text, limit=3400):
+            await update.effective_message.reply_text(
+                markdown_to_telegram_html(part), parse_mode="HTML"
+            )
+    except Exception:
+        logger.exception("Defense explanation failed for user %s", user.id)
+        db.log_request(user.id, "defense_followup", 0, 0, 0, "failed")
+        await update.effective_message.reply_text(
+            "Не удалось подготовить объяснение. Попробуй нажать кнопку ещё раз позже. "
+            "Попытка не списана."
         )
 
 
@@ -603,6 +837,7 @@ async def post_init(application: Application) -> None:
         BotCommand("faq", "Частые вопросы"), BotCommand("buy", "Купить пакет"),
         BotCommand("referral", "Пригласить друга"),
         BotCommand("about", "О боте и открытом коде"),
+        BotCommand("funnel", "Воронка запуска (владелец)"),
         BotCommand("terms", "Условия"),
         BotCommand("paysupport", "Поддержка по оплате"),
     ])
@@ -641,13 +876,20 @@ def main() -> None:
     application.add_handler(CommandHandler("referral", referral))
     application.add_handler(CommandHandler("partner", partner))
     application.add_handler(CommandHandler("refstats", refstats))
+    application.add_handler(CommandHandler("funnel", funnel))
     application.add_handler(CommandHandler("terms", terms))
     application.add_handler(CommandHandler(["support", "paysupport"], support))
     application.add_handler(PreCheckoutQueryHandler(precheckout))
-    application.add_handler(CallbackQueryHandler(buy_callback, pattern=r"^buy:(1|5)$"))
+    application.add_handler(CallbackQueryHandler(buy_callback, pattern=r"^buy:(open|1|5)$"))
     application.add_handler(
         CallbackQueryHandler(photo_callback, pattern=r"^photo:(confirm|cancel)$")
     )
+    application.add_handler(
+        CallbackQueryHandler(
+            feedback_callback, pattern=r"^feedback:\d+:(positive|negative)$"
+        )
+    )
+    application.add_handler(CallbackQueryHandler(defense_callback, pattern=r"^defense:\d+$"))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_question))

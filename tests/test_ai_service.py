@@ -115,6 +115,22 @@ class AIServiceImageTest(unittest.TestCase):
         self.assertIn("Предыдущий запрос в этой фото-сессии:\nРеши задачу 1", prompt)
         self.assertIn("Не решай остальные номера", prompt)
 
+    def test_defense_explanation_reuses_existing_answer(self) -> None:
+        service = AIService.__new__(AIService)
+        responses = FakeResponses()
+        service.client = SimpleNamespace(responses=responses)
+        service.model = "test-model"
+        service.max_output_tokens = 500
+        service.input_rate = 1.0
+        service.output_rate = 2.0
+
+        service.defense_explanation("Реши 2 + 2", "Ответ: 4")
+
+        prompt = responses.request["input"][0]["content"][0]["text"]
+        self.assertIn("Реши 2 + 2", prompt)
+        self.assertIn("Ответ: 4", prompt)
+        self.assertIn("устно защитить", responses.request["instructions"])
+
 
 if __name__ == "__main__":
     unittest.main()

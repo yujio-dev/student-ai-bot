@@ -1,5 +1,7 @@
+import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from app.database import Database
@@ -27,6 +29,29 @@ class DatabaseTest(unittest.TestCase):
         access = self.db.claim_access(2, None)
         self.db.restore_access(2, access.source)
         self.assertEqual(self.db.balance(2), (True, 0))
+
+    def test_photo_can_atomically_claim_and_restore_shared_trial(self) -> None:
+        access = self.db.claim_trial_access(52, "photo_trial")
+        self.assertEqual((access.allowed, access.source), (True, "trial"))
+        self.assertEqual(self.db.balance(52), (False, 0))
+        self.db.restore_access(52, access.source)
+        self.assertEqual(self.db.balance(52), (True, 0))
+
+    def test_text_trial_prevents_second_free_photo_trial(self) -> None:
+        self.assertEqual(self.db.claim_access(53, None).source, "trial")
+        self.assertFalse(self.db.claim_trial_access(53, None).allowed)
+
+    def test_photo_trial_prevents_second_free_text_trial(self) -> None:
+        self.assertEqual(self.db.claim_trial_access(54, None).source, "trial")
+        self.assertFalse(self.db.claim_access(54, None).allowed)
+
+    def test_concurrent_photo_trial_claim_has_single_winner(self) -> None:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            claims = list(executor.map(
+                lambda _: self.db.claim_trial_access(55, None), range(8)
+            ))
+        self.assertEqual(sum(access.allowed for access in claims), 1)
+        self.assertEqual(self.db.balance(55), (False, 0))
 
     def test_photo_claim_requires_and_restores_five_paid_credits(self) -> None:
         self.db.ensure_user(50, "photographer")
@@ -123,10 +148,11 @@ class DatabaseTest(unittest.TestCase):
         self.assertNotIn(41, self.db.reactivation_candidates(3))
 
     def test_photo_session_is_saved_replaced_and_cleared(self) -> None:
-        self.db.save_photo_session(60, "Задача 1")
+        self.db.save_photo_session(60, "Задача 1", "trial")
         session = self.db.photo_session(60)
         self.assertIsNotNone(session)
         self.assertEqual(session.recognized_tasks, "Задача 1")
+        self.assertEqual(session.access_source, "trial")
 
         self.db.save_photo_session(60, "Задача 2")
         self.assertEqual(self.db.photo_session(60).recognized_tasks, "Задача 2")
@@ -148,6 +174,88 @@ class DatabaseTest(unittest.TestCase):
         self.db.log_request(62, "photo_setup", 10, 20, 0.01, "completed")
         self.db.log_request(62, "photo_followup", 10, 20, 0.01, "completed")
         self.assertEqual(self.db.solved_tasks_count(), 1)
+
+    def test_events_and_funnel_are_aggregated_without_personal_data(self) -> None:
+        for telegram_id in (101, 102):
+            self.db.log_event(telegram_id, "start")
+        self.db.log_event(101, "start")
+        self.db.log_event(101, "text_task_submitted")
+        self.db.log_event(102, "photo_submitted")
+        self.db.log_event(101, "answer_completed")
+        self.db.log_event(101, "buy_opened")
+        self.db.log_event(101, "invoice_requested", "1")
+        self.db.add_payment(101, "funnel-payment-1", 25, 1)
+        self.db.add_payment(101, "funnel-payment-2", 100, 5)
+        request_id = self.db.log_request(101, "trial", 1, 2, 0.0, "completed")
+        self.assertTrue(self.db.record_feedback(101, request_id, positive=True))
+
+        stats = self.db.funnel_stats(7)
+        self.assertEqual(
+            (stats.starts, stats.task_submitters, stats.answer_users, stats.buy_users),
+            (2, 2, 1, 1),
+        )
+        self.assertEqual(
+            (stats.invoice_users, stats.buyers, stats.payments, stats.stars),
+            (1, 1, 2, 125),
+        )
+        self.assertEqual((stats.feedback_positive, stats.feedback_negative), (1, 0))
+
+    def test_empty_funnel_returns_zeros(self) -> None:
+        stats = self.db.funnel_stats(1)
+        self.assertEqual(sum(stats.__dict__.values()), 0)
+        with self.assertRaises(ValueError):
+            self.db.funnel_stats(2)
+
+    def test_feedback_is_counted_once_per_answer_even_if_polarity_changes(self) -> None:
+        request_id = self.db.log_request(70, "trial", 1, 2, 0.0, "completed")
+        self.assertTrue(self.db.record_feedback(70, request_id, positive=True))
+        self.assertFalse(self.db.record_feedback(70, request_id, positive=True))
+        self.assertFalse(self.db.record_feedback(70, request_id, positive=False))
+        stats = self.db.funnel_stats(7)
+        self.assertEqual((stats.feedback_positive, stats.feedback_negative), (1, 0))
+
+    def test_analytics_failure_is_non_fatal(self) -> None:
+        original_connect = self.db._connect
+        self.db._connect = lambda: (_ for _ in ()).throw(sqlite3.OperationalError("test"))
+        try:
+            with self.assertLogs("app.database", level="ERROR"):
+                self.assertFalse(self.db.log_event(1, "start"))
+        finally:
+            self.db._connect = original_connect
+
+    def test_legacy_database_migration_preserves_records(self) -> None:
+        legacy_path = Path(self.temp.name) / "legacy.db"
+        connection = sqlite3.connect(legacy_path)
+        connection.executescript(
+            """
+            CREATE TABLE users (
+                telegram_id INTEGER PRIMARY KEY, username TEXT,
+                trial_used INTEGER NOT NULL DEFAULT 0,
+                credits INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE photo_sessions (
+                telegram_id INTEGER PRIMARY KEY,
+                recognized_tasks TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO users (telegram_id, username, trial_used, credits)
+            VALUES (900, 'legacy', 1, 4);
+            INSERT INTO photo_sessions (telegram_id, recognized_tasks)
+            VALUES (900, 'Старая задача');
+            """
+        )
+        connection.commit()
+        connection.close()
+
+        migrated = Database(legacy_path)
+        self.assertEqual(migrated.balance(900), (False, 4))
+        session = migrated.photo_session(900)
+        self.assertEqual(session.recognized_tasks, "Старая задача")
+        self.assertEqual(session.last_request, "")
+        self.assertEqual(session.access_source, "photo_paid")
+        self.assertTrue(migrated.log_event(900, "start"))
 
 
 if __name__ == "__main__":
