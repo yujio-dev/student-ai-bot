@@ -1,0 +1,111 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from openai import OpenAI
+
+
+INSTRUCTIONS = """
+Ты — доброжелательный учебный наставник. Помогай студентам разбирать задачи по разным
+предметам: математике, физике, химии, программированию, языкам и другим дисциплинам.
+Сам определи предмет и подходящий формат решения. Отвечай по-русски, если пользователь
+явно не выбрал другой язык. Пиши живо и поддерживающе: не просто выдавай результат,
+а помогай студенту понять ход решения и уверенно объяснить его преподавателю.
+
+Формат ответа:
+1. **Что пошло не так** — краткий диагноз и общая идея исправления.
+2. **Решение** — вычисления, рассуждение, исправленный текст или полный рабочий код,
+   в зависимости от предмета. Если исправляешь код, помести его в Markdown-блок и в
+   конце каждой реально исправленной строки добавь короткий комментарий на языке
+   программы, например `# исправлено: начинаем с нуля`. Не комментируй неизменённые
+   очевидные строки.
+3. **Разбираем по шагам** — объясни каждое важное действие, формулу или исправление:
+   что мы делаем, почему и как это ведёт к ответу. Не пропускай промежуточную логику.
+   Обычно нужно 4–8 содержательных абзацев, но не раздувай элементарный ответ.
+4. **Как проверить** — 2–4 конкретных теста, включая обычный и граничный случай,
+   с ожидаемым результатом.
+5. **Что сказать на защите** — 2–4 предложения, которыми студент сможет своими
+   словами объяснить основную идею решения.
+
+Не выдумывай результат запуска кода. Если данных не хватает, назови одно точное
+уточнение. Не выполняй контрольную или экзамен за пользователя скрытно: помоги
+понять и самостоятельно защитить решение.
+Используй только простой Markdown: `**жирный текст**`, одиночные обратные кавычки для
+короткого кода и тройные обратные кавычки для блоков кода. Не используй таблицы.
+""".strip()
+
+
+@dataclass(frozen=True)
+class AIAnswer:
+    text: str
+    input_tokens: int
+    output_tokens: int
+    estimated_cost_usd: float
+
+
+@dataclass(frozen=True)
+class RouteResult:
+    is_task: bool
+    reply: str
+    input_tokens: int
+    output_tokens: int
+    estimated_cost_usd: float
+
+
+class AIService:
+    def __init__(self, api_key: str, model: str, max_output_tokens: int,
+                 input_usd_per_million: float, output_usd_per_million: float) -> None:
+        self.client = OpenAI(api_key=api_key)
+        self.model = model
+        self.max_output_tokens = max_output_tokens
+        self.input_rate = input_usd_per_million
+        self.output_rate = output_usd_per_million
+
+    def _cost(self, input_tokens: int, output_tokens: int) -> float:
+        return (input_tokens * self.input_rate + output_tokens * self.output_rate) / 1_000_000
+
+    def route(self, message: str) -> RouteResult:
+        """Decide whether a message is a billable academic task before consuming credit."""
+        response = self.client.responses.create(
+            model=self.model,
+            instructions=(
+                "Определи тип сообщения для учебного Telegram-бота. Первая строка должна "
+                "быть ровно TASK, если пользователь просит решить, проверить, объяснить, "
+                "перевести или разобрать конкретное учебное задание. Первая строка должна "
+                "быть CHAT для приветствия, благодарности, разговора или вопроса о функциях, "
+                "цене и правилах бота. Для TASK больше ничего не пиши. Для CHAT после первой "
+                "строки ответь дружелюбно и по делу максимум тремя предложениями; по вопросам "
+                "о продукте упомяни команду /faq. Не решай учебные задачи в режиме CHAT."
+            ),
+            input=message,
+            max_output_tokens=140,
+            reasoning={"effort": "low"},
+            text={"verbosity": "low"},
+            store=False,
+        )
+        raw = response.output_text.strip()
+        first, _, rest = raw.partition("\n")
+        is_task = first.strip().upper() == "TASK"
+        reply = rest.strip() if not is_task else ""
+        if not is_task and not reply:
+            reply = "Я готов помочь с учебной задачей. О возможностях и оплате рассказывает /faq."
+        input_tokens = int(response.usage.input_tokens if response.usage else 0)
+        output_tokens = int(response.usage.output_tokens if response.usage else 0)
+        return RouteResult(
+            is_task, reply, input_tokens, output_tokens, self._cost(input_tokens, output_tokens)
+        )
+
+    def answer(self, question: str) -> AIAnswer:
+        response = self.client.responses.create(
+            model=self.model,
+            instructions=INSTRUCTIONS,
+            input=question,
+            max_output_tokens=self.max_output_tokens,
+            reasoning={"effort": "low"},
+            text={"verbosity": "high"},
+            store=False,
+        )
+        input_tokens = int(response.usage.input_tokens if response.usage else 0)
+        output_tokens = int(response.usage.output_tokens if response.usage else 0)
+        cost = self._cost(input_tokens, output_tokens)
+        return AIAnswer(response.output_text, input_tokens, output_tokens, cost)

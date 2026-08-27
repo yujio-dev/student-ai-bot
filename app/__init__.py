@@ -1,0 +1,2 @@
+"""Student AI Bot MVP."""
+
