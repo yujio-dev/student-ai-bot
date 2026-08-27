@@ -4,11 +4,12 @@ import asyncio
 import html
 import logging
 import re
+from contextlib import suppress
 
-from telegram import BotCommand, LabeledPrice, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Update
 from telegram.constants import ChatAction
 from telegram.ext import (
-    Application, CommandHandler, ContextTypes, MessageHandler,
+    Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler,
     PreCheckoutQueryHandler, filters,
 )
 
@@ -21,8 +22,9 @@ logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", le
 # httpx logs complete Telegram request URLs, which contain the bot token.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
-PAYLOAD = "code_help_5_v1"
-BOT_VERSION = "1.1.0"
+SINGLE_PAYLOAD = "task_help_1_v1"
+PACK_PAYLOAD = "task_help_5_v1"
+BOT_VERSION = "1.2.0"
 FOUNDER_NAME = "Yujio (yujio-dev)"
 GITHUB_URL = "https://github.com/yujio-dev/student-ai-bot"
 
@@ -102,7 +104,9 @@ def services(context: ContextTypes.DEFAULT_TYPE) -> tuple[Settings, Database, AI
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _, db, _ = services(context)
     user = update.effective_user
-    db.ensure_user(user.id, user.username)
+    is_new_user = db.ensure_user(user.id, user.username)
+    if is_new_user and context.args and context.args[0].startswith("ref_"):
+        db.attach_referral(user.id, context.args[0][4:].upper())
     await update.message.reply_text(
         "Привет! Пришли учебную задачу текстом — я определю предмет, разберу решение "
         "по шагам и помогу подготовить понятное объяснение.\n\n"
@@ -123,8 +127,10 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Только сообщение, распознанное как конкретная учебная задача. Приветствия и "
         "вопросы о самом боте попытку не списывают.\n\n"
         "Сколько стоит?\n"
-        f"Первый разбор бесплатный. Затем {settings.pack_credits} разборов стоят "
-        f"{settings.pack_price_stars} Telegram Stars. Купить: /buy\n\n"
+        f"Первый разбор бесплатный. Один дополнительный разбор стоит "
+        f"{settings.single_price_stars} Stars. Выгодный пакет: {settings.pack_credits} "
+        f"разборов за {settings.pack_price_stars} Stars вместо "
+        f"{settings.single_price_stars * settings.pack_credits}. Купить: /buy\n\n"
         "Какие ограничения?\n"
         "Сейчас бот принимает только текст до 6000 символов. Изображения и файлы будут "
         "рассматриваться после проверки спроса. Ответ AI стоит перепроверять.\n\n"
@@ -144,6 +150,9 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     _, db, _ = services(context)
+    if db.has_unlimited_access(update.effective_user.id):
+        await update.message.reply_text("Безлимитный доступ: активен. Попытки не списываются.")
+        return
     trial_available, credits = db.balance(update.effective_user.id)
     trial = "доступен" if trial_available else "использован"
     await update.message.reply_text(f"Бесплатный разбор: {trial}. Оплаченных разборов: {credits}.")
@@ -151,37 +160,192 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings, _, _ = services(context)
+    regular_pack_price = settings.single_price_stars * settings.pack_credits
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"1 разбор — {settings.single_price_stars} ⭐", callback_data="buy:1"
+        )],
+        [InlineKeyboardButton(
+            f"{settings.pack_credits} разборов — {settings.pack_price_stars} ⭐ (вместо {regular_pack_price})",
+            callback_data="buy:5",
+        )],
+    ])
+    await update.effective_message.reply_text(
+        "Выбери вариант",
+        reply_markup=keyboard,
+    )
+
+
+async def send_product_invoice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, product: str
+) -> None:
+    settings, _, _ = services(context)
+    if product == "1":
+        credits, stars, payload = 1, settings.single_price_stars, SINGLE_PAYLOAD
+        title = "1 разбор учебной задачи"
+        description = "Пошаговое решение, объяснение и проверка результата."
+    else:
+        credits, stars, payload = settings.pack_credits, settings.pack_price_stars, PACK_PAYLOAD
+        title = f"{credits} разборов — выгодный пакет"
+        description = (
+            f"По одному: {settings.single_price_stars * credits} Stars. "
+            f"Цена пакета: {stars} Stars."
+        )
     await context.bot.send_invoice(
         chat_id=update.effective_chat.id,
-        title=f"{settings.pack_credits} разборов задач",
-        description="Пошаговое решение, понятное объяснение и проверка результата.",
-        payload=PAYLOAD,
+        title=title,
+        description=description,
+        payload=payload,
         currency="XTR",
-        prices=[LabeledPrice(f"{settings.pack_credits} разборов", settings.pack_price_stars)],
-        start_parameter="code-help-pack",
+        prices=[LabeledPrice(f"{credits} разборов", stars)],
+        start_parameter=f"task-help-{credits}",
     )
+
+
+async def buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    await send_product_invoice(update, context, query.data.split(":", 1)[1])
 
 
 async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings, _, _ = services(context)
     query = update.pre_checkout_query
-    valid = (query.invoice_payload == PAYLOAD and query.currency == "XTR"
-             and query.total_amount == settings.pack_price_stars)
+    expected = {
+        SINGLE_PAYLOAD: settings.single_price_stars,
+        PACK_PAYLOAD: settings.pack_price_stars,
+    }
+    valid = (query.currency == "XTR"
+             and expected.get(query.invoice_payload) == query.total_amount)
     await query.answer(ok=valid, error_message=None if valid else "Цена изменилась. Открой /buy ещё раз.")
 
 
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings, db, _ = services(context)
     payment = update.message.successful_payment
-    if payment.invoice_payload != PAYLOAD or payment.currency != "XTR":
+    products = {
+        SINGLE_PAYLOAD: (1, settings.single_price_stars),
+        PACK_PAYLOAD: (settings.pack_credits, settings.pack_price_stars),
+    }
+    product = products.get(payment.invoice_payload)
+    if (not product or payment.currency != "XTR"
+            or payment.total_amount != product[1]):
         logger.error("Unexpected payment payload for user %s", update.effective_user.id)
         return
-    added = db.add_payment(update.effective_user.id, payment.telegram_payment_charge_id,
-                           payment.total_amount, settings.pack_credits)
-    if added:
+    credits = product[0]
+    result = db.add_payment(
+        update.effective_user.id, payment.telegram_payment_charge_id,
+        payment.total_amount, credits, settings.referral_reward_credits,
+    )
+    if result.added:
         await update.message.reply_text(
-            f"Оплата получена. Добавлено разборов: {settings.pack_credits}. Пришли задачу и код."
+            f"Оплата получена. Добавлено разборов: {credits}. Пришли учебную задачу."
         )
+        if result.rewarded_referrer_id:
+            try:
+                await context.bot.send_message(
+                    result.rewarded_referrer_id,
+                    f"Твой приглашённый друг сделал первую покупку. Начислено бесплатных разборов: "
+                    f"{settings.referral_reward_credits}.",
+                )
+            except Exception:
+                logger.exception("Could not notify referrer %s", result.rewarded_referrer_id)
+
+
+async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings, db, _ = services(context)
+    user = update.effective_user
+    code = db.personal_referral_code(user.id, user.username)
+    link = f"https://t.me/{context.bot.username}?start=ref_{code}"
+    stats = db.referral_stats(user.id)[0]
+    await update.message.reply_text(
+        "<b>Твоя реферальная ссылка</b>\n"
+        f"<code>{html.escape(link)}</code>\n\n"
+        f"За первую покупку приглашённого ты получишь "
+        f"<b>{settings.referral_reward_credits} бесплатный разбор</b>.\n"
+        f"Переходов с запуском бота: {stats.joins}\n"
+        f"Покупателей: {stats.buyers}",
+        parse_mode="HTML",
+    )
+
+
+def normalize_partner_code(label: str) -> str:
+    cleaned = re.sub(r"[^A-Z0-9_]", "_", label.upper()).strip("_")
+    return f"P_{cleaned[:24]}" if cleaned else ""
+
+
+async def partner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings, db, _ = services(context)
+    if update.effective_user.id != settings.owner_telegram_id:
+        await update.message.reply_text("Команда доступна только владельцу бота.")
+        return
+    if not context.args:
+        await update.message.reply_text("Формат: /partner имя_партнёра")
+        return
+    label = " ".join(context.args).strip()
+    code = normalize_partner_code(label)
+    if not code or not db.create_cash_referral(code, label):
+        await update.message.reply_text("Не удалось создать код. Выбери другое имя.")
+        return
+    link = f"https://t.me/{context.bot.username}?start=ref_{code}"
+    await update.message.reply_text(
+        f"Денежная партнёрская ссылка для <b>{html.escape(label)}</b>:\n"
+        f"<code>{html.escape(link)}</code>\n\n"
+        "Статистика появится в /refstats. Выплата рассчитывается вручную.",
+        parse_mode="HTML",
+    )
+
+
+async def refstats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings, db, _ = services(context)
+    if update.effective_user.id == settings.owner_telegram_id:
+        stats = db.referral_stats()
+    else:
+        db.personal_referral_code(update.effective_user.id, update.effective_user.username)
+        stats = db.referral_stats(update.effective_user.id)
+    if not stats:
+        await update.message.reply_text("Реферальных ссылок пока нет.")
+        return
+    lines = ["<b>Статистика рефералов</b>"]
+    for item in stats:
+        kind = "деньги" if item.kind == "cash" else "бесплатные разборы"
+        lines.append(
+            f"\n<b>{html.escape(item.label)}</b> — {kind}\n"
+            f"Код: <code>{item.code}</code>\n"
+            f"Запустили бота: {item.joins}\n"
+            f"Покупателей: {item.buyers}\n"
+            f"Платежей: {item.payments}\n"
+            f"Выручка: {item.stars} Stars"
+        )
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def grant_reactivation_bonuses(application: Application) -> None:
+    settings: Settings = application.bot_data["settings"]
+    db: Database = application.bot_data["db"]
+    candidates = db.reactivation_candidates(settings.reactivation_days)
+    for telegram_id in candidates:
+        if not db.grant_reactivation_bonus(telegram_id, settings.reactivation_credits):
+            continue
+        try:
+            await application.bot.send_message(
+                telegram_id,
+                "Давно не виделись 👋\n\n"
+                f"Мы начислили тебе {settings.reactivation_credits} бесплатных разбора, "
+                "чтобы ты мог попробовать бота ещё раз. Просто пришли следующую учебную задачу.",
+            )
+        except Exception:
+            # The credits remain available if the user later returns or unblocks the bot.
+            logger.exception("Could not send reactivation message to user %s", telegram_id)
+
+
+async def reactivation_loop(application: Application) -> None:
+    while True:
+        try:
+            await grant_reactivation_bonuses(application)
+        except Exception:
+            logger.exception("Reactivation scan failed")
+        await asyncio.sleep(60 * 60)
 
 
 async def terms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -257,10 +421,22 @@ async def post_init(application: Application) -> None:
     await application.bot.set_my_commands([
         BotCommand("start", "Как пользоваться"), BotCommand("balance", "Остаток разборов"),
         BotCommand("faq", "Частые вопросы"), BotCommand("buy", "Купить пакет"),
+        BotCommand("referral", "Пригласить друга"),
         BotCommand("about", "О боте и открытом коде"),
         BotCommand("terms", "Условия"),
         BotCommand("paysupport", "Поддержка по оплате"),
     ])
+    application.bot_data["reactivation_task"] = asyncio.create_task(
+        reactivation_loop(application), name="reactivation-loop"
+    )
+
+
+async def post_shutdown(application: Application) -> None:
+    task = application.bot_data.get("reactivation_task")
+    if task:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 def main() -> None:
@@ -268,16 +444,26 @@ def main() -> None:
     db = Database(settings.database_path)
     ai = AIService(settings.openai_api_key, settings.openai_model, settings.max_output_tokens,
                    settings.input_usd_per_million, settings.output_usd_per_million)
-    application = Application.builder().token(settings.telegram_bot_token).post_init(post_init).build()
+    application = (
+        Application.builder()
+        .token(settings.telegram_bot_token)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
     application.bot_data.update(settings=settings, db=db, ai=ai)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("faq", faq))
     application.add_handler(CommandHandler("about", about))
     application.add_handler(CommandHandler("buy", buy))
+    application.add_handler(CommandHandler("referral", referral))
+    application.add_handler(CommandHandler("partner", partner))
+    application.add_handler(CommandHandler("refstats", refstats))
     application.add_handler(CommandHandler("terms", terms))
     application.add_handler(CommandHandler(["support", "paysupport"], support))
     application.add_handler(PreCheckoutQueryHandler(precheckout))
+    application.add_handler(CallbackQueryHandler(buy_callback, pattern=r"^buy:(1|5)$"))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_question))
     application.run_polling(allowed_updates=Update.ALL_TYPES)

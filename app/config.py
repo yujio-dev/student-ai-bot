@@ -15,6 +15,11 @@ class Settings:
     database_path: Path
     pack_price_stars: int
     pack_credits: int
+    single_price_stars: int
+    referral_reward_credits: int
+    reactivation_days: int
+    reactivation_credits: int
+    owner_telegram_id: int
     support_username: str
     input_usd_per_million: float
     output_usd_per_million: float
@@ -30,6 +35,11 @@ def load_settings() -> Settings:
         database_path=Path(os.getenv("DATABASE_PATH", "data/student_ai_bot.db")),
         pack_price_stars=int(os.getenv("PACK_PRICE_STARS", "100")),
         pack_credits=int(os.getenv("PACK_CREDITS", "5")),
+        single_price_stars=int(os.getenv("SINGLE_PRICE_STARS", "25")),
+        referral_reward_credits=int(os.getenv("REFERRAL_REWARD_CREDITS", "1")),
+        reactivation_days=int(os.getenv("REACTIVATION_DAYS", "3")),
+        reactivation_credits=int(os.getenv("REACTIVATION_CREDITS", "3")),
+        owner_telegram_id=int(os.getenv("OWNER_TELEGRAM_ID", "0")),
         support_username=os.getenv("SUPPORT_USERNAME", "").strip().lstrip("@"),
         input_usd_per_million=float(os.getenv("MODEL_INPUT_USD_PER_MILLION", "0.20")),
         output_usd_per_million=float(os.getenv("MODEL_OUTPUT_USD_PER_MILLION", "1.20")),
@@ -42,7 +52,9 @@ def load_settings() -> Settings:
         missing.append("OPENAI_API_KEY")
     if missing:
         raise RuntimeError(f"Заполните в .env: {', '.join(missing)}")
-    if settings.pack_price_stars <= 0 or settings.pack_credits <= 0:
-        raise RuntimeError("PACK_PRICE_STARS и PACK_CREDITS должны быть больше нуля")
+    if (settings.pack_price_stars <= 0 or settings.pack_credits <= 0
+            or settings.single_price_stars <= 0 or settings.referral_reward_credits <= 0):
+        raise RuntimeError("Цены, размеры пакетов и реферальная награда должны быть больше нуля")
+    if settings.reactivation_days <= 0 or settings.reactivation_credits <= 0:
+        raise RuntimeError("Параметры возвратного бонуса должны быть больше нуля")
     return settings
-
