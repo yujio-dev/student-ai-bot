@@ -3,5 +3,7 @@
 __pycache__/
 *.py[cod]
 data/*.db
+data/*.db-shm
+data/*.db-wal
+/student_ai_bot.db
 .pytest_cache/
-
