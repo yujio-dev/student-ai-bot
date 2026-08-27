@@ -28,6 +28,27 @@ class DatabaseTest(unittest.TestCase):
         self.db.restore_access(2, access.source)
         self.assertEqual(self.db.balance(2), (True, 0))
 
+    def test_photo_claim_requires_and_restores_five_paid_credits(self) -> None:
+        self.db.ensure_user(50, "photographer")
+        self.assertFalse(
+            self.db.claim_paid_credits(50, "photographer", 5, "photo_paid").allowed
+        )
+        self.assertEqual(self.db.balance(50), (True, 0))
+        self.db.add_payment(50, "photo-pack", 100, 5)
+        access = self.db.claim_paid_credits(50, "photographer", 5, "photo_paid")
+        self.assertEqual(
+            (access.allowed, access.source, access.credits_charged),
+            (True, "photo_paid", 5),
+        )
+        self.assertEqual(self.db.balance(50), (True, 0))
+        self.db.restore_access(50, access.source, access.credits_charged)
+        self.assertEqual(self.db.balance(50), (True, 5))
+
+    def test_photo_claim_does_not_consume_free_trial(self) -> None:
+        self.db.add_payment(51, "partial-photo-pack", 25, 1)
+        self.assertFalse(self.db.claim_paid_credits(51, None, 5, "photo_paid").allowed)
+        self.assertEqual(self.db.balance(51), (True, 1))
+
     def test_unlimited_access_does_not_consume_trial_or_credits(self) -> None:
         self.db.ensure_user(3, "owner")
         self.assertEqual(self.db.set_unlimited_by_username("@owner"), 1)

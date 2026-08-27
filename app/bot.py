@@ -24,9 +24,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 SINGLE_PAYLOAD = "task_help_1_v1"
 PACK_PAYLOAD = "task_help_5_v1"
-BOT_VERSION = "1.2.0"
+BOT_VERSION = "1.3.0"
 FOUNDER_NAME = "Yujio (yujio-dev)"
 GITHUB_URL = "https://github.com/yujio-dev/student-ai-bot"
+PHOTO_PRICE_STARS = 100
+PHOTO_CREDITS = 5
 
 
 def markdown_to_telegram_html(text: str) -> str:
@@ -108,11 +110,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if is_new_user and context.args and context.args[0].startswith("ref_"):
         db.attach_referral(user.id, context.args[0][4:].upper())
     await update.message.reply_text(
-        "Привет! Пришли учебную задачу текстом — я определю предмет, разберу решение "
+        "Привет! Пришли учебную задачу текстом или одной фотографией — я определю "
+        "предмет, разберу решение "
         "по шагам и помогу подготовить понятное объяснение.\n\n"
         "Первый разбор бесплатный. Важно: первое сообщение, которое бот распознает как "
         "конкретную учебную задачу, будет использовано как бесплатный разбор. Приветствия "
-        "и вопросы о работе бота попытку не расходуют. Подробнее: /faq"
+        "и вопросы о работе бота попытку не расходуют. Фоторазбор оплачивается отдельно: "
+        f"{PHOTO_PRICE_STARS} Stars или {PHOTO_CREDITS} оплаченных попыток. Подробнее: /faq"
     )
 
 
@@ -132,8 +136,10 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"разборов за {settings.pack_price_stars} Stars вместо "
         f"{settings.single_price_stars * settings.pack_credits}. Купить: /buy\n\n"
         "Какие ограничения?\n"
-        "Сейчас бот принимает только текст до 6000 символов. Изображения и файлы будут "
-        "рассматриваться после проверки спроса. Ответ AI стоит перепроверять.\n\n"
+        "Текст — до 6000 символов. Можно отправить одну фотографию задачи; перед обработкой "
+        f"бот предупредит о цене и попросит подтверждение. Фоторазбор стоит {PHOTO_PRICE_STARS} "
+        f"Stars или списывает {PHOTO_CREDITS} оплаченных попыток. PDF и другие файлы пока не "
+        "принимаются. Ответ AI стоит перепроверять.\n\n"
         "Где посмотреть остаток?\n/balance\n\n"
         "Где узнать больше о проекте?\n/about"
     )
@@ -410,10 +416,88 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
     except Exception:
         logger.exception("AI request failed for user %s", user.id)
-        db.restore_access(user.id, access.source)
+        db.restore_access(user.id, access.source, access.credits_charged)
         db.log_request(user.id, access.source, 0, 0, 0, "failed")
         await update.message.reply_text(
             "Не удалось получить ответ. Бесплатный разбор или кредит возвращён — попробуй позже."
+        )
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    photo = update.message.photo[-1]
+    if photo.file_size and photo.file_size > 10 * 1024 * 1024:
+        await update.message.reply_text("Фото слишком большое. Пришли изображение до 10 МБ.")
+        return
+    context.user_data["pending_photo"] = {
+        "file_id": photo.file_id,
+        "caption": (update.message.caption or "").strip()[:2000],
+    }
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            f"Подтвердить — {PHOTO_CREDITS} попыток",
+            callback_data="photo:confirm",
+        )],
+        [InlineKeyboardButton("Отмена", callback_data="photo:cancel")],
+    ])
+    await update.message.reply_text(
+        "Фоторазбор — отдельная функция. Он стоит 100 Telegram Stars или списывает "
+        f"{PHOTO_CREDITS} оплаченных попыток. Бесплатный первый разбор для фото не действует.\n\n"
+        "После подтверждения я распознаю условие и решу задачу. Если цена кажется "
+        "завышенной или заниженной, напиши в поддержку: /paysupport.",
+        reply_markup=keyboard,
+    )
+
+
+async def photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "photo:cancel":
+        context.user_data.pop("pending_photo", None)
+        await query.edit_message_text("Фоторазбор отменён. Попытки не списаны.")
+        return
+
+    pending = context.user_data.pop("pending_photo", None)
+    if not pending:
+        await query.edit_message_text("Фото больше не доступно. Пришли его ещё раз.")
+        return
+
+    _, db, ai = services(context)
+    user = update.effective_user
+    access = db.claim_paid_credits(user.id, user.username, PHOTO_CREDITS, "photo_paid")
+    if not access.allowed:
+        _, credits = db.balance(user.id)
+        await query.edit_message_text(
+            f"Для фоторазбора нужно {PHOTO_CREDITS} оплаченных попыток, сейчас доступно: "
+            f"{credits}. Пакет из {PHOTO_CREDITS} попыток стоит {PHOTO_PRICE_STARS} Stars. "
+            "Купить: /buy"
+        )
+        return
+
+    await query.edit_message_text(
+        f"Принято. Списано попыток: {access.credits_charged}. Распознаю и решаю задачу…"
+        if access.credits_charged else
+        "Принято. Для безлимитного доступа попытки не списываются. Распознаю и решаю задачу…"
+    )
+    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    try:
+        telegram_file = await context.bot.get_file(pending["file_id"])
+        image_bytes = bytes(await telegram_file.download_as_bytearray())
+        answer = await asyncio.to_thread(ai.answer_image, image_bytes, pending["caption"])
+        db.log_request(
+            user.id, access.source, answer.input_tokens, answer.output_tokens,
+            answer.estimated_cost_usd, "completed",
+        )
+        for part in split_message(answer.text, limit=3400):
+            await update.effective_message.reply_text(
+                markdown_to_telegram_html(part), parse_mode="HTML"
+            )
+    except Exception:
+        logger.exception("Photo AI request failed for user %s", user.id)
+        db.restore_access(user.id, access.source, access.credits_charged)
+        db.log_request(user.id, access.source, 0, 0, 0, "failed")
+        await update.effective_message.reply_text(
+            f"Не удалось обработать фото. Все {PHOTO_CREDITS} попыток возвращены — "
+            "пришли фотографию ещё раз."
         )
 
 
@@ -464,7 +548,11 @@ def main() -> None:
     application.add_handler(CommandHandler(["support", "paysupport"], support))
     application.add_handler(PreCheckoutQueryHandler(precheckout))
     application.add_handler(CallbackQueryHandler(buy_callback, pattern=r"^buy:(1|5)$"))
+    application.add_handler(
+        CallbackQueryHandler(photo_callback, pattern=r"^photo:(confirm|cancel)$")
+    )
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_question))
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 

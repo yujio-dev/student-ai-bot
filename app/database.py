@@ -11,6 +11,7 @@ from typing import Iterator
 class Access:
     allowed: bool
     source: str | None = None
+    credits_charged: int = 0
 
 
 @dataclass(frozen=True)
@@ -185,15 +186,47 @@ class Database:
                 return Access(True, "trial")
             if row["credits"] > 0:
                 db.execute("UPDATE users SET credits=credits-1 WHERE telegram_id=?", (telegram_id,))
-                return Access(True, "paid")
+                return Access(True, "paid", 1)
             return Access(False)
 
-    def restore_access(self, telegram_id: int, source: str) -> None:
+    def claim_paid_credits(
+        self, telegram_id: int, username: str | None, credits: int, source: str
+    ) -> Access:
+        """Atomically consume several paid credits without using the free trial."""
+        if credits <= 0:
+            raise ValueError("credits must be greater than zero")
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """INSERT INTO users (telegram_id, username) VALUES (?, ?)
+                ON CONFLICT(telegram_id) DO UPDATE SET username=COALESCE(excluded.username, users.username)""",
+                (telegram_id, username),
+            )
+            row = db.execute(
+                "SELECT credits, unlimited FROM users WHERE telegram_id=?", (telegram_id,)
+            ).fetchone()
+            if row["unlimited"]:
+                return Access(True, "unlimited")
+            if row["credits"] >= credits:
+                db.execute(
+                    "UPDATE users SET credits=credits-? WHERE telegram_id=?",
+                    (credits, telegram_id),
+                )
+                return Access(True, source, credits)
+            return Access(False)
+
+    def restore_access(self, telegram_id: int, source: str, credits_charged: int = 0) -> None:
         with self._connection() as db:
             if source == "trial":
                 db.execute("UPDATE users SET trial_used=0 WHERE telegram_id=?", (telegram_id,))
-            elif source == "paid":
-                db.execute("UPDATE users SET credits=credits+1 WHERE telegram_id=?", (telegram_id,))
+            else:
+                refund_credits = credits_charged or (1 if source == "paid" else 0)
+                if refund_credits <= 0:
+                    return
+                db.execute(
+                    "UPDATE users SET credits=credits+? WHERE telegram_id=?",
+                    (refund_credits, telegram_id),
+                )
 
     def personal_referral_code(self, telegram_id: int, username: str | None) -> str:
         self.ensure_user(telegram_id, username)
@@ -363,6 +396,7 @@ class Database:
         with self._connection() as db:
             row = db.execute(
                 """SELECT COUNT(*) AS count FROM requests
-                WHERE status='completed' AND access_source IN ('trial', 'paid', 'unlimited')"""
+                WHERE status='completed'
+                  AND access_source IN ('trial', 'paid', 'photo_paid', 'unlimited')"""
             ).fetchone()
         return int(row["count"])

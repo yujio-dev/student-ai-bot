@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 
 from openai import OpenAI
@@ -32,6 +33,20 @@ INSTRUCTIONS = """
 понять и самостоятельно защитить решение.
 Используй только простой Markdown: `**жирный текст**`, одиночные обратные кавычки для
 короткого кода и тройные обратные кавычки для блоков кода. Не используй таблицы.
+""".strip()
+
+
+PRODUCT_CAPABILITIES = """
+Фактические функции бота:
+- бот решает учебные задачи, отправленные текстом;
+- бот отдельно обрабатывает одну фотографию учебной задачи после подтверждения цены:
+  100 Telegram Stars или 5 оплаченных разборов;
+- бот пока не принимает PDF и другие файлы и не создаёт изображения, DOCX, PPTX или PDF;
+- бесплатный первый текстовый разбор не оплачивает фоторазбор.
+Никогда не придумывай и не обещай функции, которых нет в этом списке. Если пользователь
+спрашивает о недоступной функции, честно скажи, что она пока не реализована, и направь
+в /faq. Не утверждай, что бот уже умеет что-либо только потому, что это технически можно
+добавить в будущем.
 """.strip()
 
 
@@ -75,7 +90,8 @@ class AIService:
                 "быть CHAT для приветствия, благодарности, разговора или вопроса о функциях, "
                 "цене и правилах бота. Для TASK больше ничего не пиши. Для CHAT после первой "
                 "строки ответь дружелюбно и по делу максимум тремя предложениями; по вопросам "
-                "о продукте упомяни команду /faq. Не решай учебные задачи в режиме CHAT."
+                "о продукте упомяни команду /faq. Не решай учебные задачи в режиме CHAT.\n\n"
+                + PRODUCT_CAPABILITIES
             ),
             input=message,
             max_output_tokens=140,
@@ -109,3 +125,40 @@ class AIService:
         output_tokens = int(response.usage.output_tokens if response.usage else 0)
         cost = self._cost(input_tokens, output_tokens)
         return AIAnswer(response.output_text, input_tokens, output_tokens, cost)
+
+    def answer_image(self, image_bytes: bytes, caption: str = "") -> AIAnswer:
+        encoded = base64.b64encode(image_bytes).decode("ascii")
+        prompt = (
+            "Распознай условие учебной задачи на фотографии и реши её по инструкциям. "
+            "Если часть условия неразборчива или обрезана, не додумывай её: точно укажи, "
+            "какую часть нужно переснять."
+        )
+        if caption.strip():
+            prompt += f"\nКомментарий пользователя: {caption.strip()}"
+        response = self.client.responses.create(
+            model=self.model,
+            instructions=INSTRUCTIONS,
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:image/jpeg;base64,{encoded}",
+                        "detail": "high",
+                    },
+                ],
+            }],
+            max_output_tokens=self.max_output_tokens,
+            reasoning={"effort": "low"},
+            text={"verbosity": "high"},
+            store=False,
+        )
+        input_tokens = int(response.usage.input_tokens if response.usage else 0)
+        output_tokens = int(response.usage.output_tokens if response.usage else 0)
+        return AIAnswer(
+            response.output_text,
+            input_tokens,
+            output_tokens,
+            self._cost(input_tokens, output_tokens),
+        )

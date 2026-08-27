@@ -1,5 +1,6 @@
 import unittest
 
+from app.ai_service import PRODUCT_CAPABILITIES
 from app.bot import GITHUB_URL, format_about_message, markdown_to_telegram_html, split_message
 
 
@@ -24,6 +25,10 @@ class SplitMessageTest(unittest.TestCase):
         self.assertIn("Yujio", rendered)
         self.assertIn("Решено задач:</b> 42", rendered)
         self.assertIn(GITHUB_URL, rendered)
+
+    def test_product_prompt_does_not_promise_unavailable_features(self) -> None:
+        self.assertIn("не создаёт изображения, DOCX, PPTX или PDF", PRODUCT_CAPABILITIES)
+        self.assertIn("Никогда не придумывай", PRODUCT_CAPABILITIES)
 
 
 if __name__ == "__main__":
