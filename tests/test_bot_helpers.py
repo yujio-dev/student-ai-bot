@@ -1,6 +1,6 @@
 import unittest
 
-from app.bot import markdown_to_telegram_html, split_message
+from app.bot import GITHUB_URL, format_about_message, markdown_to_telegram_html, split_message
 
 
 class SplitMessageTest(unittest.TestCase):
@@ -17,6 +17,13 @@ class SplitMessageTest(unittest.TestCase):
         self.assertIn("x = 0  # исправлено", rendered)
         self.assertIn("• <code>x</code>", rendered)
         self.assertNotIn("```", rendered)
+
+    def test_about_message_contains_public_project_details(self) -> None:
+        rendered = format_about_message(42)
+        self.assertIn("Версия:", rendered)
+        self.assertIn("Yujio", rendered)
+        self.assertIn("Решено задач:</b> 42", rendered)
+        self.assertIn(GITHUB_URL, rendered)
 
 
 if __name__ == "__main__":

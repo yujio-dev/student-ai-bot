@@ -22,6 +22,9 @@ logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", le
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 PAYLOAD = "code_help_5_v1"
+BOT_VERSION = "1.1.0"
+FOUNDER_NAME = "Yujio (yujio-dev)"
+GITHUB_URL = "https://github.com/yujio-dev/student-ai-bot"
 
 
 def markdown_to_telegram_html(text: str) -> str:
@@ -79,6 +82,18 @@ def split_message(text: str, limit: int = 4000) -> list[str]:
     return parts
 
 
+def format_about_message(solved_tasks: int) -> str:
+    return (
+        "<b>О Student AI Bot</b>\n\n"
+        "Помогаю разбирать учебные задачи по шагам, проверять результат и готовить "
+        "понятное объяснение для защиты.\n\n"
+        f"<b>Версия:</b> {BOT_VERSION}\n"
+        f"<b>Основатель:</b> {FOUNDER_NAME}\n"
+        f"<b>Решено задач:</b> {solved_tasks}\n"
+        f'<b>Открытый код:</b> <a href="{GITHUB_URL}">GitHub</a>'
+    )
+
+
 def services(context: ContextTypes.DEFAULT_TYPE) -> tuple[Settings, Database, AIService]:
     data = context.application.bot_data
     return data["settings"], data["db"], data["ai"]
@@ -113,7 +128,17 @@ async def faq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Какие ограничения?\n"
         "Сейчас бот принимает только текст до 6000 символов. Изображения и файлы будут "
         "рассматриваться после проверки спроса. Ответ AI стоит перепроверять.\n\n"
-        "Где посмотреть остаток?\n/balance"
+        "Где посмотреть остаток?\n/balance\n\n"
+        "Где узнать больше о проекте?\n/about"
+    )
+
+
+async def about(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _, db, _ = services(context)
+    await update.message.reply_text(
+        format_about_message(db.solved_tasks_count()),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
     )
 
 
@@ -230,8 +255,9 @@ async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def post_init(application: Application) -> None:
     await application.bot.set_my_commands([
-            BotCommand("start", "Как пользоваться"), BotCommand("balance", "Остаток разборов"),
+        BotCommand("start", "Как пользоваться"), BotCommand("balance", "Остаток разборов"),
         BotCommand("faq", "Частые вопросы"), BotCommand("buy", "Купить пакет"),
+        BotCommand("about", "О боте и открытом коде"),
         BotCommand("terms", "Условия"),
         BotCommand("paysupport", "Поддержка по оплате"),
     ])
@@ -247,6 +273,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("faq", faq))
+    application.add_handler(CommandHandler("about", about))
     application.add_handler(CommandHandler("buy", buy))
     application.add_handler(CommandHandler("terms", terms))
     application.add_handler(CommandHandler(["support", "paysupport"], support))

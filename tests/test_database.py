@@ -28,7 +28,13 @@ class DatabaseTest(unittest.TestCase):
         self.db.restore_access(2, access.source)
         self.assertEqual(self.db.balance(2), (True, 0))
 
+    def test_solved_tasks_count_only_includes_completed_solutions(self) -> None:
+        self.db.log_request(1, "trial", 10, 20, 0.01, "completed")
+        self.db.log_request(2, "paid", 10, 20, 0.01, "completed")
+        self.db.log_request(3, "free_chat", 10, 20, 0.01, "completed")
+        self.db.log_request(4, "trial", 0, 0, 0, "failed")
+        self.assertEqual(self.db.solved_tasks_count(), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
-

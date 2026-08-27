@@ -141,3 +141,12 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?)""",
                 (telegram_id, source, input_tokens, output_tokens, estimated_cost_usd, status),
             )
+
+    def solved_tasks_count(self) -> int:
+        """Return the number of successfully completed task solutions."""
+        with self._connection() as db:
+            row = db.execute(
+                """SELECT COUNT(*) AS count FROM requests
+                WHERE status='completed' AND access_source IN ('trial', 'paid')"""
+            ).fetchone()
+        return int(row["count"])
