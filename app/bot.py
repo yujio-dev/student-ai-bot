@@ -6,6 +6,7 @@ import html
 import io
 import logging
 import re
+import socket
 from contextlib import suppress
 
 from telegram import (
@@ -34,6 +35,22 @@ GITHUB_URL = "https://github.com/yujio-dev/student-ai-bot"
 PHOTO_PRICE_STARS = 100
 PHOTO_CREDITS = 5
 PHOTO_SESSION_HOURS = 24
+SINGLE_INSTANCE_PORT = 38473
+
+
+def acquire_single_instance_lock() -> socket.socket:
+    """Keep one local bot process so test runs cannot steal Telegram polling."""
+    lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        lock.bind(("127.0.0.1", SINGLE_INSTANCE_PORT))
+        lock.listen(1)
+    except OSError as exc:
+        lock.close()
+        raise RuntimeError(
+            "Student AI Bot is already running. Use the background task instead of "
+            "starting a second copy."
+        ) from exc
+    return lock
 
 
 def markdown_to_telegram_html(text: str) -> str:
@@ -908,6 +925,7 @@ async def post_shutdown(application: Application) -> None:
 
 
 def main() -> None:
+    instance_lock = acquire_single_instance_lock()
     settings = load_settings()
     db = Database(settings.database_path)
     ai = AIService(settings.openai_api_key, settings.openai_model, settings.max_output_tokens,
@@ -947,7 +965,10 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_question))
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    finally:
+        instance_lock.close()
 
 
 if __name__ == "__main__":
