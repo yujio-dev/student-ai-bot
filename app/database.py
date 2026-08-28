@@ -71,6 +71,55 @@ class DailyFunnelStats:
     feedback_negative: int
 
 
+@dataclass(frozen=True)
+class AdminOverview:
+    total_users: int
+    trial_users: int
+    paying_users: int
+    unlimited_users: int
+    completed_requests: int
+    failed_requests: int
+    input_tokens: int
+    output_tokens: int
+    estimated_cost_usd: float
+    payments: int
+    stars: int
+
+
+@dataclass(frozen=True)
+class AdminUser:
+    telegram_id: int
+    username: str | None
+    trial_available: bool
+    credits: int
+    unlimited: bool
+    completed_requests: int
+    failed_requests: int
+    payments: int
+    stars: int
+    estimated_cost_usd: float
+    created_at: str
+
+
+@dataclass(frozen=True)
+class AdminPayment:
+    charge_id: str
+    telegram_id: int
+    username: str | None
+    stars: int
+    credits: int
+    created_at: str
+
+
+@dataclass(frozen=True)
+class AdminAction:
+    admin_telegram_id: int
+    action: str
+    target_telegram_id: int | None
+    details: str
+    created_at: str
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -162,6 +211,14 @@ class Database:
                     source TEXT,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS admin_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    admin_telegram_id INTEGER NOT NULL,
+                    action TEXT NOT NULL,
+                    target_telegram_id INTEGER,
+                    details TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 CREATE INDEX IF NOT EXISTS idx_events_name_created
                     ON events(event_name, created_at);
                 CREATE INDEX IF NOT EXISTS idx_events_user_created
@@ -169,6 +226,8 @@ class Database:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_one_feedback_per_answer
                     ON events(telegram_id, source)
                     WHERE event_name IN ('feedback_positive', 'feedback_negative');
+                CREATE INDEX IF NOT EXISTS idx_admin_actions_created
+                    ON admin_actions(created_at DESC);
                 """
             )
             columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
@@ -243,6 +302,232 @@ class Database:
                 (int(enabled), normalized),
             )
             return cursor.rowcount
+
+    @staticmethod
+    def _admin_user_from_row(row: sqlite3.Row) -> AdminUser:
+        return AdminUser(
+            telegram_id=int(row["telegram_id"]),
+            username=str(row["username"]) if row["username"] else None,
+            trial_available=not bool(row["trial_used"]),
+            credits=int(row["credits"]),
+            unlimited=bool(row["unlimited"]),
+            completed_requests=int(row["completed_requests"]),
+            failed_requests=int(row["failed_requests"]),
+            payments=int(row["payments"]),
+            stars=int(row["stars"]),
+            estimated_cost_usd=float(row["estimated_cost_usd"]),
+            created_at=str(row["created_at"]),
+        )
+
+    def admin_overview(self) -> AdminOverview:
+        with self._connection() as db:
+            users = db.execute(
+                """SELECT COUNT(*) AS total_users,
+                SUM(CASE WHEN trial_used=1 THEN 1 ELSE 0 END) AS trial_users,
+                SUM(CASE WHEN unlimited=1 THEN 1 ELSE 0 END) AS unlimited_users
+                FROM users"""
+            ).fetchone()
+            requests = db.execute(
+                """SELECT
+                SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_requests,
+                SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_requests,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd
+                FROM requests"""
+            ).fetchone()
+            payments = db.execute(
+                """SELECT COUNT(*) AS payments, COUNT(DISTINCT telegram_id) AS paying_users,
+                COALESCE(SUM(stars), 0) AS stars FROM payments"""
+            ).fetchone()
+        return AdminOverview(
+            total_users=int(users["total_users"] or 0),
+            trial_users=int(users["trial_users"] or 0),
+            paying_users=int(payments["paying_users"] or 0),
+            unlimited_users=int(users["unlimited_users"] or 0),
+            completed_requests=int(requests["completed_requests"] or 0),
+            failed_requests=int(requests["failed_requests"] or 0),
+            input_tokens=int(requests["input_tokens"] or 0),
+            output_tokens=int(requests["output_tokens"] or 0),
+            estimated_cost_usd=float(requests["estimated_cost_usd"] or 0),
+            payments=int(payments["payments"] or 0),
+            stars=int(payments["stars"] or 0),
+        )
+
+    def admin_users(self, query: str = "", limit: int = 5, offset: int = 0) -> tuple[list[AdminUser], int]:
+        if limit <= 0 or offset < 0:
+            raise ValueError("invalid pagination")
+        normalized = query.strip().lstrip("@").casefold()
+        where = ""
+        params: list[object] = []
+        if normalized:
+            if normalized.isdigit():
+                where = "WHERE u.telegram_id=? OR lower(COALESCE(u.username, '')) LIKE ?"
+                params.extend((int(normalized), f"%{normalized}%"))
+            else:
+                where = "WHERE lower(COALESCE(u.username, '')) LIKE ?"
+                params.append(f"%{normalized}%")
+        with self._connection() as db:
+            total = int(db.execute(
+                f"SELECT COUNT(*) FROM users u {where}", params
+            ).fetchone()[0])
+            rows = db.execute(
+                f"""SELECT u.telegram_id, u.username, u.trial_used, u.credits, u.unlimited,
+                u.created_at,
+                COALESCE(r.completed_requests, 0) AS completed_requests,
+                COALESCE(r.failed_requests, 0) AS failed_requests,
+                COALESCE(p.payments, 0) AS payments,
+                COALESCE(p.stars, 0) AS stars,
+                COALESCE(r.estimated_cost_usd, 0) AS estimated_cost_usd
+                FROM users u
+                LEFT JOIN (
+                    SELECT telegram_id,
+                    SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_requests,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_requests,
+                    SUM(estimated_cost_usd) AS estimated_cost_usd
+                    FROM requests GROUP BY telegram_id
+                ) r ON r.telegram_id=u.telegram_id
+                LEFT JOIN (
+                    SELECT telegram_id, COUNT(*) AS payments, SUM(stars) AS stars
+                    FROM payments GROUP BY telegram_id
+                ) p ON p.telegram_id=u.telegram_id
+                {where}
+                ORDER BY u.created_at DESC, u.telegram_id DESC
+                LIMIT ? OFFSET ?""",
+                (*params, limit, offset),
+            ).fetchall()
+        return [self._admin_user_from_row(row) for row in rows], total
+
+    def admin_user(self, telegram_id: int) -> AdminUser | None:
+        with self._connection() as db:
+            row = db.execute(
+                """SELECT u.telegram_id, u.username, u.trial_used, u.credits, u.unlimited,
+                u.created_at,
+                COALESCE(r.completed_requests, 0) AS completed_requests,
+                COALESCE(r.failed_requests, 0) AS failed_requests,
+                COALESCE(r.estimated_cost_usd, 0) AS estimated_cost_usd,
+                COALESCE(p.payments, 0) AS payments,
+                COALESCE(p.stars, 0) AS stars
+                FROM users u
+                LEFT JOIN (
+                    SELECT telegram_id,
+                    SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed_requests,
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_requests,
+                    SUM(estimated_cost_usd) AS estimated_cost_usd
+                    FROM requests GROUP BY telegram_id
+                ) r ON r.telegram_id=u.telegram_id
+                LEFT JOIN (
+                    SELECT telegram_id, COUNT(*) AS payments, SUM(stars) AS stars
+                    FROM payments GROUP BY telegram_id
+                ) p ON p.telegram_id=u.telegram_id
+                WHERE u.telegram_id=?""",
+                (telegram_id,),
+            ).fetchone()
+        return self._admin_user_from_row(row) if row else None
+
+    def admin_adjust_credits(self, admin_id: int, telegram_id: int, delta: int) -> int | None:
+        if delta == 0:
+            raise ValueError("delta must not be zero")
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT credits FROM users WHERE telegram_id=?", (telegram_id,)
+            ).fetchone()
+            if not row or int(row["credits"]) + delta < 0:
+                return None
+            new_balance = int(row["credits"]) + delta
+            db.execute("UPDATE users SET credits=? WHERE telegram_id=?", (new_balance, telegram_id))
+            db.execute(
+                """INSERT INTO admin_actions
+                (admin_telegram_id, action, target_telegram_id, details)
+                VALUES (?, 'credits_adjusted', ?, ?)""",
+                (admin_id, telegram_id, f"delta={delta}; balance={new_balance}"),
+            )
+            return new_balance
+
+    def admin_set_unlimited(self, admin_id: int, telegram_id: int, enabled: bool) -> bool:
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT username FROM users WHERE telegram_id=?", (telegram_id,)
+            ).fetchone()
+            if not row:
+                return False
+            db.execute(
+                "UPDATE users SET unlimited=? WHERE telegram_id=?", (int(enabled), telegram_id)
+            )
+            if row["username"]:
+                if enabled:
+                    db.execute(
+                        "INSERT OR IGNORE INTO unlimited_usernames (username) VALUES (?)",
+                        (row["username"],),
+                    )
+                else:
+                    db.execute(
+                        "DELETE FROM unlimited_usernames WHERE username=? COLLATE NOCASE",
+                        (row["username"],),
+                    )
+            db.execute(
+                """INSERT INTO admin_actions
+                (admin_telegram_id, action, target_telegram_id, details)
+                VALUES (?, 'unlimited_changed', ?, ?)""",
+                (admin_id, telegram_id, f"enabled={int(enabled)}"),
+            )
+            return True
+
+    def admin_reset_trial(self, admin_id: int, telegram_id: int) -> bool:
+        with self._connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                "UPDATE users SET trial_used=0 WHERE telegram_id=?", (telegram_id,)
+            )
+            if not cursor.rowcount:
+                return False
+            db.execute(
+                """INSERT INTO admin_actions
+                (admin_telegram_id, action, target_telegram_id, details)
+                VALUES (?, 'trial_reset', ?, '')""",
+                (admin_id, telegram_id),
+            )
+            return True
+
+    def admin_payments(self, limit: int = 5, offset: int = 0) -> tuple[list[AdminPayment], int]:
+        if limit <= 0 or offset < 0:
+            raise ValueError("invalid pagination")
+        with self._connection() as db:
+            total = int(db.execute("SELECT COUNT(*) FROM payments").fetchone()[0])
+            rows = db.execute(
+                """SELECT p.telegram_charge_id, p.telegram_id, u.username,
+                p.stars, p.credits, p.created_at
+                FROM payments p LEFT JOIN users u ON u.telegram_id=p.telegram_id
+                ORDER BY p.created_at DESC LIMIT ? OFFSET ?""",
+                (limit, offset),
+            ).fetchall()
+        return [
+            AdminPayment(
+                str(row["telegram_charge_id"]), int(row["telegram_id"]),
+                str(row["username"]) if row["username"] else None,
+                int(row["stars"]), int(row["credits"]), str(row["created_at"]),
+            ) for row in rows
+        ], total
+
+    def admin_actions(self, limit: int = 5, offset: int = 0) -> tuple[list[AdminAction], int]:
+        if limit <= 0 or offset < 0:
+            raise ValueError("invalid pagination")
+        with self._connection() as db:
+            total = int(db.execute("SELECT COUNT(*) FROM admin_actions").fetchone()[0])
+            rows = db.execute(
+                """SELECT admin_telegram_id, action, target_telegram_id, details, created_at
+                FROM admin_actions ORDER BY id DESC LIMIT ? OFFSET ?""",
+                (limit, offset),
+            ).fetchall()
+        return [
+            AdminAction(
+                int(row["admin_telegram_id"]), str(row["action"]),
+                int(row["target_telegram_id"]) if row["target_telegram_id"] is not None else None,
+                str(row["details"]), str(row["created_at"]),
+            ) for row in rows
+        ], total
 
     def claim_access(self, telegram_id: int, username: str | None) -> Access:
         """Atomically consume the free trial or one paid credit."""

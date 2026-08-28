@@ -239,6 +239,64 @@ class DatabaseTest(unittest.TestCase):
         finally:
             self.db._connect = original_connect
 
+    def test_admin_overview_and_user_search(self) -> None:
+        self.db.ensure_user(101, "Alice")
+        self.db.ensure_user(202, "bob")
+        self.db.claim_access(101, "Alice")
+        self.db.log_request(101, "trial", 100, 50, 0.002, "completed")
+        self.db.log_request(202, "paid", 10, 5, 0.001, "failed")
+        self.db.add_payment(101, "pay-1", 25, 1)
+        self.db.add_payment(101, "pay-2", 100, 5)
+
+        overview = self.db.admin_overview()
+        self.assertEqual(overview.total_users, 2)
+        self.assertEqual(overview.paying_users, 1)
+        self.assertEqual(overview.payments, 2)
+        self.assertEqual(overview.stars, 125)
+        self.assertEqual(overview.completed_requests, 1)
+        self.assertAlmostEqual(overview.estimated_cost_usd, 0.003)
+
+        users, total = self.db.admin_users("ali")
+        self.assertEqual(total, 1)
+        self.assertEqual(users[0].telegram_id, 101)
+        self.assertEqual(users[0].payments, 2)
+        self.assertEqual(users[0].stars, 125)
+        self.assertAlmostEqual(users[0].estimated_cost_usd, 0.002)
+        self.assertEqual(self.db.admin_user(101).username, "Alice")
+
+    def test_admin_credit_unlimited_trial_and_audit_are_atomic(self) -> None:
+        self.db.ensure_user(303, "managed")
+        self.db.claim_access(303, "managed")
+
+        self.assertEqual(self.db.admin_adjust_credits(999, 303, 5), 5)
+        self.assertIsNone(self.db.admin_adjust_credits(999, 303, -6))
+        self.assertEqual(self.db.balance(303), (False, 5))
+        self.assertTrue(self.db.admin_set_unlimited(999, 303, True))
+        self.assertTrue(self.db.has_unlimited_access(303))
+        self.assertTrue(self.db.admin_reset_trial(999, 303))
+        self.assertEqual(self.db.balance(303), (True, 5))
+
+        actions, total = self.db.admin_actions(limit=10)
+        self.assertEqual(total, 3)
+        self.assertEqual(actions[0].action, "trial_reset")
+        self.assertEqual(actions[-1].details, "delta=5; balance=5")
+
+    def test_admin_payments_are_paginated_newest_first(self) -> None:
+        self.db.ensure_user(404, "buyer")
+        for index in range(7):
+            self.db.add_payment(404, f"charge-{index}", 25, 1)
+        with self.db._connection() as connection:
+            connection.execute(
+                "UPDATE payments SET created_at=datetime('now', '+' || rowid || ' seconds')"
+            )
+
+        first, total = self.db.admin_payments(limit=5, offset=0)
+        second, _ = self.db.admin_payments(limit=5, offset=5)
+        self.assertEqual(total, 7)
+        self.assertEqual(len(first), 5)
+        self.assertEqual(len(second), 2)
+        self.assertEqual(first[0].charge_id, "charge-6")
+
     def test_legacy_database_migration_preserves_records(self) -> None:
         legacy_path = Path(self.temp.name) / "legacy.db"
         connection = sqlite3.connect(legacy_path)

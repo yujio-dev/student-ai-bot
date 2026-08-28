@@ -10,7 +10,8 @@ import socket
 from contextlib import suppress
 
 from telegram import (
-    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, LabeledPrice, Update,
+    BotCommand, BotCommandScopeChat, InlineKeyboardButton, InlineKeyboardMarkup, InputFile,
+    LabeledPrice, Update,
 )
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -20,7 +21,7 @@ from telegram.ext import (
 
 from app.ai_service import AIService
 from app.config import Settings, load_settings
-from app.database import DailyFunnelStats, Database, FunnelStats
+from app.database import AdminUser, DailyFunnelStats, Database, FunnelStats
 
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=logging.INFO)
@@ -29,13 +30,14 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 SINGLE_PAYLOAD = "task_help_1_v1"
 PACK_PAYLOAD = "task_help_5_v1"
-BOT_VERSION = "1.6.0"
+BOT_VERSION = "1.7.0"
 FOUNDER_NAME = "Yujio (yujio-dev)"
 GITHUB_URL = "https://github.com/yujio-dev/student-ai-bot"
 PHOTO_PRICE_STARS = 100
 PHOTO_CREDITS = 5
 PHOTO_SESSION_HOURS = 24
 SINGLE_INSTANCE_PORT = 38473
+ADMIN_PAGE_SIZE = 5
 
 
 def acquire_single_instance_lock() -> socket.socket:
@@ -532,6 +534,280 @@ async def refstats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+def admin_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 Статистика", callback_data="admin:home"),
+            InlineKeyboardButton("👥 Пользователи", callback_data="admin:allusers:0"),
+        ],
+        [
+            InlineKeyboardButton("💳 Платежи", callback_data="admin:payments:0"),
+            InlineKeyboardButton("🤝 Партнёры", callback_data="admin:partners:0"),
+        ],
+        [InlineKeyboardButton("🧾 Журнал действий", callback_data="admin:audit:0")],
+    ])
+
+
+def admin_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⬅️ В админ-панель", callback_data="admin:home")
+    ]])
+
+
+def admin_overview_text(db: Database) -> str:
+    overview = db.admin_overview()
+    today = db.funnel_stats(1)
+    week = db.funnel_stats(7)
+    return (
+        "<b>Админ-панель TaskMentor</b>\n\n"
+        "<b>Сегодня / 7 дней</b>\n"
+        f"Запуски: <b>{today.starts}</b> / {week.starts}\n"
+        f"Получили ответ: <b>{today.answer_users}</b> / {week.answer_users}\n"
+        f"Покупатели: <b>{today.buyers}</b> / {week.buyers}\n"
+        f"Stars: <b>{today.stars}</b> / {week.stars}\n\n"
+        "<b>За всё время</b>\n"
+        f"Пользователи: <b>{overview.total_users}</b>\n"
+        f"Использовали пробный разбор: <b>{overview.trial_users}</b>\n"
+        f"Платящие: <b>{overview.paying_users}</b>\n"
+        f"Безлимит: <b>{overview.unlimited_users}</b>\n"
+        f"Успешные ответы: <b>{overview.completed_requests}</b>\n"
+        f"Ошибки: <b>{overview.failed_requests}</b>\n"
+        f"Платежи: <b>{overview.payments}</b> на <b>{overview.stars} Stars</b>\n"
+        f"Расчётные расходы AI: <b>${overview.estimated_cost_usd:.4f}</b>\n"
+        f"Токены: {overview.input_tokens:,} вход / {overview.output_tokens:,} выход"
+    )
+
+
+def admin_user_text(user: AdminUser) -> str:
+    username = f"@{html.escape(user.username)}" if user.username else "без username"
+    trial = "доступна" if user.trial_available else "использована"
+    unlimited = "включён" if user.unlimited else "выключен"
+    return (
+        f"<b>Пользователь {username}</b>\n"
+        f"ID: <code>{user.telegram_id}</code>\n"
+        f"Регистрация: {html.escape(user.created_at)} UTC\n\n"
+        f"Бесплатная попытка: <b>{trial}</b>\n"
+        f"Кредиты: <b>{user.credits}</b>\n"
+        f"Безлимит: <b>{unlimited}</b>\n\n"
+        f"Успешные запросы: {user.completed_requests}\n"
+        f"Ошибки: {user.failed_requests}\n"
+        f"Платежи: {user.payments} на {user.stars} Stars\n"
+        f"Расходы AI: ${user.estimated_cost_usd:.4f}"
+    )
+
+
+def admin_user_keyboard(user: AdminUser) -> InlineKeyboardMarkup:
+    unlimited_label = "🚫 Убрать безлимит" if user.unlimited else "♾ Выдать безлимит"
+    unlimited_value = 0 if user.unlimited else 1
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("+1", callback_data=f"admin:credits:{user.telegram_id}:p1"),
+            InlineKeyboardButton("+5", callback_data=f"admin:credits:{user.telegram_id}:p5"),
+            InlineKeyboardButton("−1", callback_data=f"admin:credits:{user.telegram_id}:m1"),
+        ],
+        [InlineKeyboardButton(
+            unlimited_label,
+            callback_data=f"admin:unlimited:{user.telegram_id}:{unlimited_value}",
+        )],
+        [InlineKeyboardButton(
+            "🎁 Восстановить бесплатную попытку",
+            callback_data=f"admin:trial:{user.telegram_id}",
+        )],
+        [InlineKeyboardButton("⬅️ К пользователям", callback_data="admin:users:0")],
+    ])
+
+
+def pagination_row(prefix: str, page: int, total: int) -> list[InlineKeyboardButton]:
+    pages = max(1, (total + ADMIN_PAGE_SIZE - 1) // ADMIN_PAGE_SIZE)
+    row: list[InlineKeyboardButton] = []
+    if page > 0:
+        row.append(InlineKeyboardButton("⬅️", callback_data=f"admin:{prefix}:{page - 1}"))
+    row.append(InlineKeyboardButton(f"{page + 1}/{pages}", callback_data="admin:noop"))
+    if page + 1 < pages:
+        row.append(InlineKeyboardButton("➡️", callback_data=f"admin:{prefix}:{page + 1}"))
+    return row
+
+
+def admin_users_view(db: Database, query: str, page: int) -> tuple[str, InlineKeyboardMarkup]:
+    users, total = db.admin_users(query, ADMIN_PAGE_SIZE, page * ADMIN_PAGE_SIZE)
+    title = f"Результаты поиска: <b>{html.escape(query)}</b>" if query else "<b>Пользователи</b>"
+    lines = [title, f"Найдено: {total}"]
+    rows: list[list[InlineKeyboardButton]] = []
+    for user in users:
+        name = f"@{user.username}" if user.username else str(user.telegram_id)
+        flags = " ♾" if user.unlimited else ""
+        lines.append(f"\n{name} · {user.credits} кр. · {user.stars} Stars{flags}")
+        rows.append([InlineKeyboardButton(
+            f"{name} · {user.credits} кр.", callback_data=f"admin:user:{user.telegram_id}"
+        )])
+    if not users:
+        lines.append("\nСовпадений нет.")
+    rows.append(pagination_row("users", page, total))
+    rows.append([InlineKeyboardButton("🔎 Найти пользователя", callback_data="admin:search")])
+    if query:
+        rows.append([InlineKeyboardButton("Показать всех", callback_data="admin:allusers:0")])
+    rows.append([InlineKeyboardButton("⬅️ В админ-панель", callback_data="admin:home")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings, db, _ = services(context)
+    if update.effective_user.id != settings.owner_telegram_id:
+        await update.message.reply_text("Команда недоступна.")
+        return
+    context.user_data.pop("admin_search_pending", None)
+    await update.message.reply_text(
+        admin_overview_text(db), parse_mode="HTML", reply_markup=admin_menu_keyboard()
+    )
+
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    settings, db, _ = services(context)
+    if update.effective_user.id != settings.owner_telegram_id:
+        await query.answer("Недоступно", show_alert=True)
+        return
+    await query.answer()
+    parts = query.data.split(":")
+    action = parts[1]
+    if action == "noop":
+        return
+    if action == "home":
+        context.user_data.pop("admin_search_pending", None)
+        await query.edit_message_text(
+            admin_overview_text(db), parse_mode="HTML", reply_markup=admin_menu_keyboard()
+        )
+        return
+    if action == "search":
+        context.user_data["admin_search_pending"] = True
+        await query.edit_message_text(
+            "<b>Поиск пользователя</b>\n\nОтправьте @username или цифровой Telegram ID.",
+            parse_mode="HTML", reply_markup=admin_back_keyboard(),
+        )
+        return
+    if action in {"users", "allusers"}:
+        if action == "allusers":
+            context.user_data.pop("admin_search_query", None)
+        page = max(0, int(parts[2]))
+        text, keyboard = admin_users_view(
+            db, context.user_data.get("admin_search_query", ""), page
+        )
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+        return
+    if action == "user":
+        user = db.admin_user(int(parts[2]))
+        if not user:
+            await query.edit_message_text("Пользователь не найден.", reply_markup=admin_back_keyboard())
+            return
+        await query.edit_message_text(
+            admin_user_text(user), parse_mode="HTML", reply_markup=admin_user_keyboard(user)
+        )
+        return
+    if action == "credits":
+        telegram_id = int(parts[2])
+        delta = {"p1": 1, "p5": 5, "m1": -1}[parts[3]]
+        balance = db.admin_adjust_credits(settings.owner_telegram_id, telegram_id, delta)
+        if balance is None:
+            user = db.admin_user(telegram_id)
+            message = "Недостаточно кредитов для списания." if user else "Пользователь не найден."
+            await query.edit_message_text(
+                message, reply_markup=admin_user_keyboard(user) if user else admin_back_keyboard()
+            )
+            return
+        user = db.admin_user(telegram_id)
+        await query.edit_message_text(
+            admin_user_text(user), parse_mode="HTML", reply_markup=admin_user_keyboard(user)
+        )
+        return
+    if action == "unlimited":
+        telegram_id, enabled = int(parts[2]), bool(int(parts[3]))
+        if not db.admin_set_unlimited(settings.owner_telegram_id, telegram_id, enabled):
+            await query.edit_message_text("Пользователь не найден.", reply_markup=admin_back_keyboard())
+            return
+        user = db.admin_user(telegram_id)
+        await query.edit_message_text(
+            admin_user_text(user), parse_mode="HTML", reply_markup=admin_user_keyboard(user)
+        )
+        return
+    if action == "trial":
+        telegram_id = int(parts[2])
+        if not db.admin_reset_trial(settings.owner_telegram_id, telegram_id):
+            await query.edit_message_text("Пользователь не найден.", reply_markup=admin_back_keyboard())
+            return
+        user = db.admin_user(telegram_id)
+        await query.edit_message_text(
+            admin_user_text(user), parse_mode="HTML", reply_markup=admin_user_keyboard(user)
+        )
+        return
+    if action == "payments":
+        page = max(0, int(parts[2]))
+        payments, total = db.admin_payments(ADMIN_PAGE_SIZE, page * ADMIN_PAGE_SIZE)
+        lines = ["<b>Платежи</b>", f"Всего: {total}"]
+        for payment in payments:
+            name = f"@{html.escape(payment.username)}" if payment.username else str(payment.telegram_id)
+            lines.append(
+                f"\n<b>{payment.stars} Stars</b> · {payment.credits} кр.\n"
+                f"{name} · <code>{payment.telegram_id}</code>\n{payment.created_at} UTC"
+            )
+        keyboard = InlineKeyboardMarkup([
+            pagination_row("payments", page, total),
+            [InlineKeyboardButton("⬅️ В админ-панель", callback_data="admin:home")],
+        ])
+        await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
+        return
+    if action == "partners":
+        page = max(0, int(parts[2]))
+        all_stats = db.referral_stats()
+        items = all_stats[page * ADMIN_PAGE_SIZE:(page + 1) * ADMIN_PAGE_SIZE]
+        lines = ["<b>Партнёры и рефералы</b>", f"Всего ссылок: {len(all_stats)}"]
+        for item in items:
+            kind = "партнёр" if item.kind == "cash" else "реферал"
+            lines.append(
+                f"\n<b>{html.escape(item.label)}</b> · {kind}\n"
+                f"<code>{item.code}</code> · запусков {item.joins} · покупателей {item.buyers}\n"
+                f"{item.payments} платежей · {item.stars} Stars"
+            )
+        lines.append("\nСоздать денежную ссылку: /partner имя")
+        keyboard = InlineKeyboardMarkup([
+            pagination_row("partners", page, len(all_stats)),
+            [InlineKeyboardButton("⬅️ В админ-панель", callback_data="admin:home")],
+        ])
+        await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
+        return
+    if action == "audit":
+        page = max(0, int(parts[2]))
+        actions, total = db.admin_actions(ADMIN_PAGE_SIZE, page * ADMIN_PAGE_SIZE)
+        labels = {
+            "credits_adjusted": "Изменены кредиты",
+            "unlimited_changed": "Изменён безлимит",
+            "trial_reset": "Восстановлена попытка",
+        }
+        lines = ["<b>Журнал действий</b>", f"Всего записей: {total}"]
+        for item in actions:
+            lines.append(
+                f"\n<b>{labels.get(item.action, html.escape(item.action))}</b>\n"
+                f"Пользователь: <code>{item.target_telegram_id}</code>\n"
+                f"{html.escape(item.details) or 'без дополнительных данных'}\n{item.created_at} UTC"
+            )
+        keyboard = InlineKeyboardMarkup([
+            pagination_row("audit", page, total),
+            [InlineKeyboardButton("⬅️ В админ-панель", callback_data="admin:home")],
+        ])
+        await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
+
+
+async def admin_or_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    settings, db, _ = services(context)
+    if (update.effective_user.id == settings.owner_telegram_id
+            and context.user_data.pop("admin_search_pending", False)):
+        query = (update.message.text or "").strip()[:64]
+        context.user_data["admin_search_query"] = query
+        text, keyboard = admin_users_view(db, query, 0)
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+        return
+    await handle_question(update, context)
+
+
 async def grant_reactivation_bonuses(application: Application) -> None:
     settings: Settings = application.bot_data["settings"]
     db: Database = application.bot_data["db"]
@@ -900,17 +1176,28 @@ async def defense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def post_init(application: Application) -> None:
-    await application.bot.set_my_commands([
+    public_commands = [
         BotCommand("start", "Как пользоваться"), BotCommand("balance", "Остаток разборов"),
         BotCommand("newtask", "Сбросить контекст фото"),
         BotCommand("faq", "Частые вопросы"), BotCommand("buy", "Купить пакет"),
         BotCommand("referral", "Пригласить друга"),
         BotCommand("about", "О боте и открытом коде"),
-        BotCommand("funnel", "Воронка запуска (владелец)"),
-        BotCommand("funnelcsv", "Выгрузить воронку в CSV (владелец)"),
         BotCommand("terms", "Условия"),
         BotCommand("paysupport", "Поддержка по оплате"),
-    ])
+    ]
+    await application.bot.set_my_commands(public_commands)
+    settings: Settings = application.bot_data["settings"]
+    if settings.owner_telegram_id:
+        await application.bot.set_my_commands(
+            [
+                BotCommand("admin", "Панель владельца"),
+                BotCommand("funnel", "Воронка запуска"),
+                BotCommand("funnelcsv", "Выгрузить воронку в CSV"),
+                BotCommand("partner", "Создать партнёрскую ссылку"),
+                *public_commands,
+            ],
+            scope=BotCommandScopeChat(chat_id=settings.owner_telegram_id),
+        )
     application.bot_data["reactivation_task"] = asyncio.create_task(
         reactivation_loop(application), name="reactivation-loop"
     )
@@ -947,6 +1234,7 @@ def main() -> None:
     application.add_handler(CommandHandler("referral", referral))
     application.add_handler(CommandHandler("partner", partner))
     application.add_handler(CommandHandler("refstats", refstats))
+    application.add_handler(CommandHandler("admin", admin))
     application.add_handler(CommandHandler("funnel", funnel))
     application.add_handler(CommandHandler("funnelcsv", funnel_csv))
     application.add_handler(CommandHandler("terms", terms))
@@ -962,9 +1250,10 @@ def main() -> None:
         )
     )
     application.add_handler(CallbackQueryHandler(defense_callback, pattern=r"^defense:\d+$"))
+    application.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^admin:"))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
     application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_question))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_or_question))
     try:
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     finally:

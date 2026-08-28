@@ -5,6 +5,9 @@ from types import SimpleNamespace
 
 from app.ai_service import AIAnswer
 from app.bot import (
+    admin,
+    admin_callback,
+    admin_or_question,
     defense_callback,
     feedback_callback,
     funnel,
@@ -12,6 +15,8 @@ from app.bot import (
     handle_photo,
     handle_question,
     photo_callback,
+    post_init,
+    post_shutdown,
 )
 from app.database import Database
 
@@ -39,7 +44,7 @@ class FakeQuery:
         self.answers = []
         self.edits = []
 
-    async def answer(self, text=None):
+    async def answer(self, text=None, **kwargs):
         self.answers.append(text)
 
     async def edit_message_text(self, text, **kwargs):
@@ -55,11 +60,20 @@ class FakeTelegramFile:
 
 
 class FakeBot:
+    def __init__(self):
+        self.command_sets = []
+
     async def send_chat_action(self, *args, **kwargs):
         return None
 
     async def get_file(self, file_id):
         return FakeTelegramFile()
+
+    async def set_my_commands(self, commands, **kwargs):
+        self.command_sets.append((commands, kwargs))
+
+    async def send_message(self, *args, **kwargs):
+        return None
 
 
 class FailingAI:
@@ -228,6 +242,73 @@ class BotFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("date_utc,starts,task_submitters", content)
         self.assertNotIn("777", content)
         self.assertIn("Без Telegram ID", kwargs["caption"])
+
+    async def test_admin_is_owner_only_and_opens_overview(self) -> None:
+        await admin(self.update(), self.context)
+        self.assertEqual(self.message.sent[-1][0], "Команда недоступна.")
+
+        self.user.id = 999
+        self.db.ensure_user(999, "owner")
+        await admin(self.update(), self.context)
+        text, kwargs = self.message.sent[-1]
+        self.assertIn("Админ-панель TaskMentor", text)
+        self.assertIn("Пользователи: <b>1</b>", text)
+        callbacks = [
+            button.callback_data
+            for row in kwargs["reply_markup"].inline_keyboard for button in row
+        ]
+        self.assertIn("admin:allusers:0", callbacks)
+        self.assertIn("admin:payments:0", callbacks)
+
+    async def test_admin_search_and_user_mutations_are_audited(self) -> None:
+        self.user.id = 999
+        self.db.ensure_user(777, "target_user")
+
+        search = FakeQuery("admin:search")
+        await admin_callback(self.update(search), self.context)
+        self.assertTrue(self.context.user_data["admin_search_pending"])
+        self.message.text = "@target"
+        await admin_or_question(self.update(), self.context)
+        self.assertIn("target_user", self.message.sent[-1][0])
+
+        credit = FakeQuery("admin:credits:777:p5")
+        await admin_callback(self.update(credit), self.context)
+        self.assertEqual(self.db.balance(777), (True, 5))
+        self.assertIn("Кредиты: <b>5</b>", credit.edits[-1][0])
+
+        unlimited = FakeQuery("admin:unlimited:777:1")
+        await admin_callback(self.update(unlimited), self.context)
+        self.assertTrue(self.db.has_unlimited_access(777))
+        actions, total = self.db.admin_actions(limit=10)
+        self.assertEqual(total, 2)
+        self.assertEqual(actions[0].action, "unlimited_changed")
+
+    async def test_admin_callbacks_reject_non_owner(self) -> None:
+        query = FakeQuery("admin:home")
+        await admin_callback(self.update(query), self.context)
+        self.assertEqual(query.answers, ["Недоступно"])
+        self.assertEqual(query.edits, [])
+
+    async def test_admin_command_is_visible_only_in_owner_chat_scope(self) -> None:
+        bot = FakeBot()
+        application = SimpleNamespace(
+            bot=bot,
+            bot_data={
+                "settings": SimpleNamespace(
+                    owner_telegram_id=999, reactivation_days=3, reactivation_credits=3
+                ),
+                "db": self.db,
+            },
+        )
+        await post_init(application)
+        await post_shutdown(application)
+
+        public_commands = [item.command for item in bot.command_sets[0][0]]
+        owner_commands = [item.command for item in bot.command_sets[1][0]]
+        self.assertNotIn("admin", public_commands)
+        self.assertNotIn("funnel", public_commands)
+        self.assertIn("admin", owner_commands)
+        self.assertEqual(bot.command_sets[1][1]["scope"].chat_id, 999)
 
     async def test_defense_callback_is_free_and_reuses_cached_result(self) -> None:
         ai = SuccessfulAI()
