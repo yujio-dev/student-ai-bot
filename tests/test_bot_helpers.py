@@ -79,6 +79,10 @@ class SplitMessageTest(unittest.TestCase):
         self.assertTrue(is_photo_followup("Объясни вторую подробнее"))
         self.assertTrue(is_photo_followup("Продолжи разбор"))
         self.assertTrue(is_photo_followup("Объясни для защиты"))
+        self.assertTrue(is_photo_followup("все это тест"))
+        self.assertTrue(is_photo_followup("с этим тестом помоги"))
+        self.assertTrue(is_photo_followup("реши весь тест"))
+        self.assertTrue(is_photo_followup("все"))
         self.assertFalse(is_photo_followup("Привет, сколько стоит бот?"))
 
     def test_feedback_keyboard_contains_compact_callbacks(self) -> None:

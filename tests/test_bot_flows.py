@@ -157,6 +157,18 @@ class BotFlowTest(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(followups, 1)
 
+    async def test_whole_test_phrase_reuses_active_photo_session(self) -> None:
+        self.context.application.bot_data["ai"] = SuccessfulAI()
+        await handle_photo(self.update(), self.context)
+        await photo_callback(self.update(FakeQuery("photo:confirm")), self.context)
+
+        self.message.text = "все это тест"
+        await handle_question(self.update(), self.context)
+
+        self.assertIn("Решение для: все это тест", self.message.sent[-1][0])
+        self.assertEqual(self.db.photo_session(self.user.id).last_request, "все это тест")
+        self.assertEqual(self.db.balance(self.user.id), (False, 0))
+
     async def test_used_text_trial_keeps_paid_photo_offer(self) -> None:
         self.db.claim_access(self.user.id, self.user.username)
         await handle_photo(self.update(), self.context)
