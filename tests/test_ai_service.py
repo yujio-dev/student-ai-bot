@@ -113,7 +113,37 @@ class AIServiceImageTest(unittest.TestCase):
         self.assertIn("Задача 1: 2 + 2", prompt)
         self.assertIn("Объясни подробнее", prompt)
         self.assertIn("Предыдущий запрос в этой фото-сессии:\nРеши задачу 1", prompt)
-        self.assertIn("Не решай остальные номера", prompt)
+        self.assertIn("ответь только на выбранные номера", prompt)
+
+    def test_generic_photo_caption_requests_all_recognized_tasks(self) -> None:
+        service = AIService.__new__(AIService)
+        responses = FakeResponses()
+        service.client = SimpleNamespace(responses=responses)
+        service.model = "test-model"
+        service.max_output_tokens = 500
+        service.input_rate = 1.0
+        service.output_rate = 2.0
+
+        service.answer_photo_session("1. вопрос\n2. вопрос", "напиши сразу ответ")
+
+        prompt = responses.request["input"][0]["content"][0]["text"]
+        self.assertIn("Реши все задания, распознанные на фотографии", prompt)
+        self.assertIn("не утверждай, что условия не приложены", prompt)
+
+    def test_number_range_is_kept_as_explicit_photo_request(self) -> None:
+        service = AIService.__new__(AIService)
+        responses = FakeResponses()
+        service.client = SimpleNamespace(responses=responses)
+        service.model = "test-model"
+        service.max_output_tokens = 500
+        service.input_rate = 1.0
+        service.output_rate = 2.0
+
+        service.answer_photo_session("1. вопрос\n10. вопрос", "Давай с 1 по 10")
+
+        prompt = responses.request["input"][0]["content"][0]["text"]
+        self.assertIn("Давай с 1 по 10", prompt)
+        self.assertNotIn("Исходная просьба пользователя", prompt)
 
     def test_defense_explanation_reuses_existing_answer(self) -> None:
         service = AIService.__new__(AIService)
