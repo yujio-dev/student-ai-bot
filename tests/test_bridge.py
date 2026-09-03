@@ -5,7 +5,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
+import os
 from urllib.error import HTTPError, URLError
 
 from app.bridge_client import BridgeError, StudentOSBridgeClient
@@ -18,6 +19,16 @@ def payment():
 
 
 class BridgeTest(unittest.TestCase):
+    def test_bridge_mode_does_not_require_legacy_ai_key(self):
+        from app.config import load_settings
+        env = {"TELEGRAM_BOT_TOKEN": "synthetic-token", "STUDENT_OS_BRIDGE_ENABLED": "true",
+               "STUDENT_OS_API_URL": "https://core.example", "STUDENT_OS_BRIDGE_SECRET": "synthetic-secret"}
+        with patch("app.config.load_dotenv"), patch.dict(os.environ, env, clear=True):
+            self.assertEqual(load_settings().openai_api_key, "")
+            os.environ["STUDENT_OS_BRIDGE_ENABLED"] = "false"
+            with self.assertRaises(RuntimeError):
+                load_settings()
+
     def test_signs_exact_unicode_body_and_uses_timeout(self):
         client = StudentOSBridgeClient("https://core.example", "test-only-secret")
         client._opener = Mock()
@@ -29,7 +40,7 @@ class BridgeTest(unittest.TestCase):
                             + headers["x-bridge-nonce"].encode() + b"." + req.data, hashlib.sha256).hexdigest()
         self.assertEqual(headers["x-bridge-signature"], expected)
         self.assertEqual(json.loads(req.data), payment())
-        self.assertEqual(client._opener.open.call_args.kwargs["timeout"], 45)
+        self.assertEqual(client._opener.open.call_args.kwargs["timeout"], 10)
 
     def test_url_and_response_bounds_and_safe_errors(self):
         for url in ("http://example.com", "https://user:secret@example.com", "https://example.com?key=x", "file:///tmp/a"):
@@ -84,3 +95,14 @@ class BridgeTest(unittest.TestCase):
             self.assertEqual(outbox.pending()[0]["last_error"], "core_http_502")
             outbox.enqueue(payment())
             self.assertEqual(len(outbox.pending()), 1)
+
+    def test_outage_stops_batch_after_one_delivery_attempt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outbox = PaymentOutbox(Path(temp) / "outbox.db")
+            for number in range(5):
+                outbox.enqueue({**payment(), "charge_id": f"charge-{number}"})
+            core = Mock()
+            core.record_payment.side_effect = BridgeError(503)
+            self.assertEqual(outbox.retry(core), 0)
+            self.assertEqual(core.record_payment.call_count, 1)
+            self.assertEqual(len(outbox.pending()), 5)

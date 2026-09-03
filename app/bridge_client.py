@@ -78,12 +78,18 @@ class StudentOSBridgeClient:
     def get_products(self) -> dict:
         return self.post("products", {}, timeout=5)
 
+    def health(self) -> dict:
+        return self.post("health", {}, timeout=5)
+
     def submit_text_task(self, telegram: dict, assignment: str, request_id: str) -> dict:
         return self.post("study/text", {"telegram": telegram, "assignment": assignment,
                                         "request_id": request_id})
 
     def record_payment(self, payload: dict) -> dict:
-        return self.post("payments/telegram-stars", payload)
+        return self.post("payments/telegram-stars", payload, timeout=10)
+
+    def feedback(self, telegram, rating, request_id):
+        return self.post("feedback", {"telegram": telegram, "rating": rating, "request_id": request_id}, timeout=5)
 
     def quote_photo(self, telegram, data, mime):
         return self.post("study/photo/quote", {"telegram": telegram,

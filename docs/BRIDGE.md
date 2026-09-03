@@ -6,7 +6,7 @@ Do not enable for live use before the manual cutover checks below.
 Configuration (default OFF): `STUDENT_OS_BRIDGE_ENABLED=false`,
 `STUDENT_OS_API_URL` is the HTTPS Core origin, `STUDENT_OS_BRIDGE_SECRET`
 matches Core `BOT_BRIDGE_SECRET`. HTTP is accepted only on loopback for tests.
-Never commit actual secrets. The current runtime still requires its legacy OpenAI key.
+Never commit actual secrets. Bridge mode does not instantiate the legacy AI client or require its OpenAI key; Core owns that key.
 
 The client signs `v2.POST.<endpoint path>.<timestamp>.<nonce>.<exact UTF-8 JSON>`, has bounded bodies/responses,
 rejects redirects and never retries AI automatically. Payments use Core's existing

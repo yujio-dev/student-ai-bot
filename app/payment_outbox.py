@@ -55,6 +55,11 @@ class PaymentOutbox:
                 "SELECT * FROM payment_outbox WHERE delivery_state='pending' ORDER BY COALESCE(last_attempt_at,0),created_at LIMIT ?",
                 (min(max(limit, 1), 100),))]
 
+    def get(self, charge_id):
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM payment_outbox WHERE charge_id=?", (charge_id,)).fetchone()
+        return dict(row) if row else None
+
     def deliver(self, client: StudentOSBridgeClient, row: dict) -> bool:
         error = None
         try:
@@ -78,4 +83,13 @@ class PaymentOutbox:
         return error is None
 
     def retry(self, client: StudentOSBridgeClient, limit: int = 20) -> int:
-        return sum(self.deliver(client, row) for row in self.pending(limit))
+        delivered = 0
+        for row in self.pending(limit):
+            if self.deliver(client, row):
+                delivered += 1
+            else:
+                # Rotate attempted rows fairly, but stop a batch on network/server outage.
+                latest = self.get(row["charge_id"])
+                if latest and latest["last_error"] in {"core_http_429", "core_http_500", "core_http_502", "core_http_503", "core_http_504"}:
+                    break
+        return delivered

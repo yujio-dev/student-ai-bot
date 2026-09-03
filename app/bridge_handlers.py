@@ -63,7 +63,9 @@ async def send_result(message, context, result, defense_key):
     while len(entries) >= 5:
         entries.pop(next(iter(entries)))
     entries[defense_key] = (time.time() + 3600, render_result(result, defense=True))
-    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Как защитить", callback_data=f"coredef:{defense_key}")]])
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Как защитить", callback_data=f"coredef:{defense_key}")],
+        [InlineKeyboardButton("👍", callback_data=f"corefb:{defense_key}:positive"),
+         InlineKeyboardButton("👎", callback_data=f"corefb:{defense_key}:negative")]])
     await send_plain(message, render_result(result), keyboard)
 
 
@@ -110,7 +112,9 @@ async def dispatch(update: Update, context):
                 outbox = data["payment_outbox"]
                 # FIRST durable commit, even if Core/catalog is currently unavailable.
                 await asyncio.to_thread(outbox.enqueue, payload)
-                await asyncio.to_thread(outbox.retry, client, 20)
+                row = await asyncio.to_thread(outbox.get, payload["charge_id"])
+                if row["delivery_state"] == "pending":
+                    await asyncio.to_thread(outbox.deliver, client, row)
                 await message.reply_text("Платёж сохранён. Баланс: /balance. Если Core недоступен, начисление будет повторено автоматически.")
         elif query:
             action = query.data or ""
@@ -133,6 +137,15 @@ async def dispatch(update: Update, context):
                     await send_plain(message, entry[1])
                 else:
                     await message.reply_text("Контекст защиты истёк. Он доступен час после ответа.")
+            elif action.startswith("corefb:"):
+                await query.answer()
+                _, key, rating = action.split(":")
+                entry = context.user_data.get("core_defense", {}).get(key)
+                if entry and entry[0] > time.time() and rating in {"positive", "negative"}:
+                    await asyncio.to_thread(client.feedback, user, rating, f"telegram-feedback:{user['telegram_user_id']}:{key}")
+                    await message.reply_text("Спасибо, отзыв сохранён в Student OS.")
+                else:
+                    await message.reply_text("Кнопка отзыва истекла.")
             elif action.startswith("corephoto:"):
                 await query.answer()
                 pending = context.user_data.pop("core_pending_photo", None)

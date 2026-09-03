@@ -1222,8 +1222,9 @@ def main() -> None:
     instance_lock = acquire_single_instance_lock()
     settings = load_settings()
     db = Database(settings.database_path)
-    ai = AIService(settings.openai_api_key, settings.openai_model, settings.max_output_tokens,
-                   settings.input_usd_per_million, settings.output_usd_per_million)
+    ai = None if settings.student_os_bridge_enabled else AIService(
+        settings.openai_api_key, settings.openai_model, settings.max_output_tokens,
+        settings.input_usd_per_million, settings.output_usd_per_million)
     application = (
         Application.builder()
         .token(settings.telegram_bot_token)

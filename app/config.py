@@ -54,7 +54,7 @@ def load_settings() -> Settings:
     missing = []
     if not settings.telegram_bot_token:
         missing.append("TELEGRAM_BOT_TOKEN")
-    if not settings.openai_api_key:
+    if not settings.openai_api_key and not settings.student_os_bridge_enabled:
         missing.append("OPENAI_API_KEY")
     if missing:
         raise RuntimeError(f"Заполните в .env: {', '.join(missing)}")

@@ -1,5 +1,17 @@
 # Student AI Bot — коммерческий MVP
 
+## Student OS Core adapter
+
+Общий режим реализован за `STUDENT_OS_BRIDGE_ENABLED=false` (по умолчанию OFF).
+При включении identity, trial/credits/unlimited, текст, фото, Stars и отзывы используют
+Core. Бот не создаёт собственный AI client и не требует OPENAI_API_KEY в bridge mode.
+Платежи сначала сохраняются в отдельный durable outbox; network outage не теряет
+оплаченные Stars. Цены прежние: 25 Stars/1 credit, 100 Stars/5 credits.
+Фото: quote → подтверждение → задачи, контекст 24 часа, trial либо 5 credits;
+follow-ups без второго setup-charge. «Как защитить» использует общий результат.
+Legacy mode сохранён, старую DB не удалять. Настройка и ручной cutover/rollback:
+[docs/BRIDGE.md](docs/BRIDGE.md). Ниже описан standalone режим, который остаётся default.
+
 Telegram-бот разбирает текстовые учебные задачи по разным предметам, объясняет решение
 по шагам и помогает подготовиться к защите. Первый разбор бесплатный, дальше продаётся
 один разбор или пакет из пяти разборов за Telegram Stars. Рабочий бот:

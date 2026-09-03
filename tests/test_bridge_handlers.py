@@ -39,6 +39,9 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         await self.run_dispatch()
         self.assertEqual(self.client.submit_text_task.call_count, 1)
         self.assertIn("Подстановка", self.message.reply_text.call_args.args[0])
+        self.update.callback_query.data = "corefb:12:positive"
+        await self.run_dispatch()
+        self.client.feedback.assert_called_once()
 
     async def test_outage_payment_is_durable_before_call(self):
         self.message.successful_payment = SimpleNamespace(currency="XTR", telegram_payment_charge_id="paid",
