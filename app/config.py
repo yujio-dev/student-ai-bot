@@ -24,6 +24,9 @@ class Settings:
     input_usd_per_million: float
     output_usd_per_million: float
     max_output_tokens: int
+    student_os_bridge_enabled: bool = False
+    student_os_api_url: str = ""
+    student_os_bridge_secret: str = ""
 
 
 def load_settings() -> Settings:
@@ -44,6 +47,9 @@ def load_settings() -> Settings:
         input_usd_per_million=float(os.getenv("MODEL_INPUT_USD_PER_MILLION", "0.20")),
         output_usd_per_million=float(os.getenv("MODEL_OUTPUT_USD_PER_MILLION", "1.20")),
         max_output_tokens=int(os.getenv("MAX_OUTPUT_TOKENS", "1800")),
+        student_os_bridge_enabled=os.getenv("STUDENT_OS_BRIDGE_ENABLED", "false").lower() == "true",
+        student_os_api_url=os.getenv("STUDENT_OS_API_URL", "").strip(),
+        student_os_bridge_secret=os.getenv("STUDENT_OS_BRIDGE_SECRET", "").strip(),
     )
     missing = []
     if not settings.telegram_bot_token:
@@ -52,6 +58,9 @@ def load_settings() -> Settings:
         missing.append("OPENAI_API_KEY")
     if missing:
         raise RuntimeError(f"Заполните в .env: {', '.join(missing)}")
+    if settings.student_os_bridge_enabled:
+        from app.bridge_client import StudentOSBridgeClient
+        StudentOSBridgeClient(settings.student_os_api_url, settings.student_os_bridge_secret)
     if (settings.pack_price_stars <= 0 or settings.pack_credits <= 0
             or settings.single_price_stars <= 0 or settings.referral_reward_credits <= 0):
         raise RuntimeError("Цены, размеры пакетов и реферальная награда должны быть больше нуля")

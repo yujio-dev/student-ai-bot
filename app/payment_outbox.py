@@ -1,0 +1,74 @@
+"""Separate durable delivery journal. Never modifies the legacy ledger."""
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from contextlib import contextmanager
+from pathlib import Path
+
+from app.bridge_client import BridgeError, StudentOSBridgeClient
+
+
+class PaymentOutbox:
+    def __init__(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.path = path
+        with self._connect() as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS payment_outbox (
+                charge_id TEXT PRIMARY KEY, payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL, delivery_state TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at INTEGER,
+                last_error TEXT, delivered_at INTEGER)""")
+            db.execute("CREATE INDEX IF NOT EXISTS outbox_pending ON payment_outbox(delivery_state, last_attempt_at)")
+
+    @contextmanager
+    def _connect(self):
+        db = sqlite3.connect(self.path, timeout=10)
+        db.row_factory = sqlite3.Row
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    def enqueue(self, payload: dict) -> None:
+        charge = payload["charge_id"]
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        if not isinstance(charge, str) or not 1 <= len(charge) <= 180 or len(encoded) > 4096:
+            raise ValueError("Invalid payment envelope")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old = db.execute("SELECT payload FROM payment_outbox WHERE charge_id=?", (charge,)).fetchone()
+            if old:
+                previous = json.loads(old["payload"])
+                # Profile names may change between duplicate Telegram updates.
+                if any(previous[k] != payload[k] for k in ("product_id", "stars_paid")) or previous["telegram"]["telegram_user_id"] != payload["telegram"]["telegram_user_id"]:
+                    raise ValueError("Conflicting payment charge")
+                return
+            db.execute("INSERT INTO payment_outbox(charge_id,payload,created_at) VALUES (?,?,?)",
+                       (charge, encoded, int(time.time())))
+
+    def pending(self, limit: int = 20) -> list[dict]:
+        with self._connect() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT * FROM payment_outbox WHERE delivery_state='pending' ORDER BY COALESCE(last_attempt_at,0),created_at LIMIT ?",
+                (min(max(limit, 1), 100),))]
+
+    def deliver(self, client: StudentOSBridgeClient, row: dict) -> bool:
+        error = None
+        try:
+            client.record_payment(json.loads(row["payload"]))
+        except BridgeError as exc:
+            error = f"core_http_{exc.status}"
+        now = int(time.time())
+        with self._connect() as db:
+            # A late failed concurrent retry must never downgrade delivered.
+            db.execute("""UPDATE payment_outbox SET attempts=attempts+1,
+                last_attempt_at=?,last_error=?,delivery_state=?,delivered_at=?
+                WHERE charge_id=? AND delivery_state='pending'""",
+                (now, error, "pending" if error else "delivered", None if error else now, row["charge_id"]))
+        return error is None
+
+    def retry(self, client: StudentOSBridgeClient, limit: int = 20) -> int:
+        return sum(self.deliver(client, row) for row in self.pending(limit))
