@@ -8,7 +8,7 @@ Configuration (default OFF): `STUDENT_OS_BRIDGE_ENABLED=false`,
 matches Core `BOT_BRIDGE_SECRET`. HTTP is accepted only on loopback for tests.
 Never commit actual secrets. The current runtime still requires its legacy OpenAI key.
 
-The client signs timestamp + nonce + exact UTF-8 JSON, has bounded bodies/responses,
+The client signs `v2.POST.<endpoint path>.<timestamp>.<nonce>.<exact UTF-8 JSON>`, has bounded bodies/responses,
 rejects redirects and never retries AI automatically. Payments use Core's existing
 `charge_id`, `product_id`, `stars_paid`, `telegram` contract.
 

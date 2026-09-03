@@ -44,9 +44,10 @@ class StudentOSBridgeClient:
         if len(body) > 64 * 1024:
             raise BridgeError(413)
         timestamp, nonce = str(int(time.time())), secrets.token_urlsafe(24)
-        signature = hmac.new(self._secret.encode(), timestamp.encode() + b"."
+        path = "/api/internal/v1/" + operation
+        signature = hmac.new(self._secret.encode(), b"v2.POST." + path.encode() + b"." + timestamp.encode() + b"."
                              + nonce.encode() + b"." + body, hashlib.sha256).hexdigest()
-        request = Request(self.base_url + "/api/internal/v1/" + operation, data=body,
+        request = Request(self.base_url + path, data=body,
                           headers={"Content-Type": "application/json",
                                    "X-Bridge-Timestamp": timestamp,
                                    "X-Bridge-Nonce": nonce,

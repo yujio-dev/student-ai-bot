@@ -25,7 +25,7 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(client.record_payment(payment()), {"ok": True})
         req = client._opener.open.call_args.args[0]
         headers = dict((k.lower(), v) for k, v in req.header_items())
-        expected = hmac.new(b"test-only-secret", headers["x-bridge-timestamp"].encode() + b"."
+        expected = hmac.new(b"test-only-secret", b"v2.POST./api/internal/v1/payments/telegram-stars." + headers["x-bridge-timestamp"].encode() + b"."
                             + headers["x-bridge-nonce"].encode() + b"." + req.data, hashlib.sha256).hexdigest()
         self.assertEqual(headers["x-bridge-signature"], expected)
         self.assertEqual(json.loads(req.data), payment())
