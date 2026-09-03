@@ -23,7 +23,7 @@ class BridgeTest(unittest.TestCase):
         from app.config import load_settings
         env = {"TELEGRAM_BOT_TOKEN": "synthetic-token", "STUDENT_OS_BRIDGE_ENABLED": "true",
                "STUDENT_OS_API_URL": "https://core.example", "STUDENT_OS_BRIDGE_SECRET": "synthetic-secret"}
-        with patch("app.config.load_dotenv"), patch.dict(os.environ, env, clear=True):
+        with patch("app.config.load_dotenv"), patch("app.bridge_client.StudentOSBridgeClient"), patch.dict(os.environ, env, clear=True):
             self.assertEqual(load_settings().openai_api_key, "")
             os.environ["STUDENT_OS_BRIDGE_ENABLED"] = "false"
             with self.assertRaises(RuntimeError):
