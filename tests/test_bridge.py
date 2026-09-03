@@ -67,9 +67,20 @@ class BridgeTest(unittest.TestCase):
                 reopened.enqueue(altered)
             stale = reopened.pending()[0]
             core.record_payment.side_effect = None
+            core.record_payment.return_value = {"payment": {"telegram_payment_charge_id": "synthetic-charge",
+                "product_id": "task_help_1_v1", "stars_paid": 25, "telegram_user_id": "123"}}
             self.assertEqual(reopened.retry(core), 1)
             core.record_payment.side_effect = BridgeError()
             reopened.deliver(core, stale)
             self.assertEqual(reopened.pending(), [])
-            reopened.enqueue(payment())
-            self.assertEqual(reopened.pending(), [])
+
+    def test_invalid_receipt_stays_pending(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outbox = PaymentOutbox(Path(temp) / "outbox.db")
+            outbox.enqueue(payment())
+            core = Mock()
+            core.record_payment.return_value = {}
+            self.assertEqual(outbox.retry(core), 0)
+            self.assertEqual(outbox.pending()[0]["last_error"], "core_http_502")
+            outbox.enqueue(payment())
+            self.assertEqual(len(outbox.pending()), 1)

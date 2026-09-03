@@ -39,7 +39,7 @@ class StudentOSBridgeClient:
         self.timeout = timeout
         self._opener = build_opener(_NoRedirect())
 
-    def post(self, operation: str, payload: dict) -> dict:
+    def post(self, operation: str, payload: dict, *, timeout: float | None = None) -> dict:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
         if len(body) > 64 * 1024:
             raise BridgeError(413)
@@ -52,7 +52,7 @@ class StudentOSBridgeClient:
                                    "X-Bridge-Nonce": nonce,
                                    "X-Bridge-Signature": signature}, method="POST")
         try:
-            with self._opener.open(request, timeout=self.timeout) as response:
+            with self._opener.open(request, timeout=timeout or self.timeout) as response:
                 raw = response.read(256 * 1024 + 1)
             if len(raw) > 256 * 1024:
                 raise BridgeError(502)
@@ -73,7 +73,7 @@ class StudentOSBridgeClient:
         return self.post("entitlement", {"telegram": telegram})
 
     def get_products(self) -> dict:
-        return self.post("products", {})
+        return self.post("products", {}, timeout=5)
 
     def submit_text_task(self, telegram: dict, assignment: str, request_id: str) -> dict:
         return self.post("study/text", {"telegram": telegram, "assignment": assignment,

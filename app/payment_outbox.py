@@ -58,7 +58,14 @@ class PaymentOutbox:
     def deliver(self, client: StudentOSBridgeClient, row: dict) -> bool:
         error = None
         try:
-            client.record_payment(json.loads(row["payload"]))
+            payload = json.loads(row["payload"])
+            response = client.record_payment(payload)
+            receipt = response.get("payment", {})
+            if (receipt.get("telegram_payment_charge_id") != payload["charge_id"]
+                    or receipt.get("product_id") != payload["product_id"]
+                    or receipt.get("stars_paid") != payload["stars_paid"]
+                    or str(receipt.get("telegram_user_id")) != str(payload["telegram"]["telegram_user_id"])):
+                raise BridgeError(502)
         except BridgeError as exc:
             error = f"core_http_{exc.status}"
         now = int(time.time())

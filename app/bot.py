@@ -21,6 +21,7 @@ from telegram.ext import (
 
 from app.ai_service import AIService
 from app.config import Settings, load_settings
+from app.bridge_handlers import install as install_bridge, retry_loop as bridge_retry_loop
 from app.database import AdminUser, DailyFunnelStats, Database, FunnelStats
 
 
@@ -1204,7 +1205,8 @@ async def post_init(application: Application) -> None:
             scope=BotCommandScopeChat(chat_id=settings.owner_telegram_id),
         )
     application.bot_data["reactivation_task"] = asyncio.create_task(
-        reactivation_loop(application), name="reactivation-loop"
+        bridge_retry_loop(application) if application.bot_data.get("bridge") else reactivation_loop(application),
+        name="maintenance-loop"
     )
 
 
@@ -1230,6 +1232,7 @@ def main() -> None:
         .build()
     )
     application.bot_data.update(settings=settings, db=db, ai=ai)
+    install_bridge(application, settings)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("balance", balance))
     application.add_handler(CommandHandler("newtask", new_task))
