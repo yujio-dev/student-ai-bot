@@ -10,6 +10,7 @@ import hmac
 import json
 import secrets
 import time
+import base64
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -41,7 +42,8 @@ class StudentOSBridgeClient:
 
     def post(self, operation: str, payload: dict, *, timeout: float | None = None) -> dict:
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
-        if len(body) > 64 * 1024:
+        limit = 9 * 1024 * 1024 if operation in {"study/photo/quote", "study/photo/confirm"} else 64 * 1024
+        if len(body) > limit:
             raise BridgeError(413)
         timestamp, nonce = str(int(time.time())), secrets.token_urlsafe(24)
         path = "/api/internal/v1/" + operation
@@ -82,3 +84,18 @@ class StudentOSBridgeClient:
 
     def record_payment(self, payload: dict) -> dict:
         return self.post("payments/telegram-stars", payload)
+
+    def quote_photo(self, telegram, data, mime):
+        return self.post("study/photo/quote", {"telegram": telegram,
+            "image_b64": base64.b64encode(data).decode(), "mime": mime})
+
+    def latest_photo(self, telegram):
+        return self.post("study/photo/session", {"telegram": telegram})
+
+    def confirm_photo(self, telegram, data, mime, quote_id):
+        return self.post("study/photo/confirm", {"telegram": telegram,
+            "image_b64": base64.b64encode(data).decode(), "mime": mime, "quote_id": quote_id})
+
+    def answer_photo(self, telegram, session_id, selection, request_id):
+        return self.post("study/photo/answer", {"telegram": telegram,
+            "session_id": session_id, "selection": selection, "request_id": request_id})

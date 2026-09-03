@@ -73,7 +73,7 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         app = Mock()
         install(app, SimpleNamespace(student_os_bridge_enabled=False))
         app.add_handler.assert_not_called()
-        self.message.photo = ["photo"]
+        self.message.photo = [SimpleNamespace(file_size=7*1024*1024)]
         await self.run_dispatch()
         self.client.submit_text_task.assert_not_called()
         self.context.application.bot_data.clear()
@@ -83,3 +83,22 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         result = render_result({"explanation": "Ә <script> 😀" * 10000})
         self.assertLessEqual(len(result), 60000)
         self.assertIn("Ә", result)
+
+    async def test_photo_quote_confirm_selection_share_core(self):
+        self.message.photo = [SimpleNamespace(file_size=100, file_id="fixture")]
+        self.context.bot.get_file = AsyncMock(return_value=SimpleNamespace(download_as_bytearray=AsyncMock(return_value=b"synthetic-jpeg")))
+        self.client.quote_photo.return_value = {"quote_id": "synthetic-quote-id", "uses_trial": True, "credits": 0, "can_confirm": True}
+        await self.run_dispatch()
+        self.client.confirm_photo.assert_not_called()
+        self.message.photo = None
+        self.update.callback_query = SimpleNamespace(data="corephoto:synthetic-quote-id", answer=AsyncMock(), id="callback-1")
+        self.client.confirm_photo.return_value = {"session_id": "synthetic-quote-id", "tasks": ["Задача 1", "Задача 2"], "expires_at": 9999999999}
+        await self.run_dispatch()
+        self.assertNotIn("core_pending_photo", self.context.user_data)
+        self.update.callback_query.data = "coreselect:synthetic-quote-id:all"
+        self.client.answer_photo.return_value = {"analysis": "Понимание", "how_to_defend": "Защита"}
+        await self.run_dispatch()
+        self.assertEqual(self.client.answer_photo.call_args.args[2], [0, 1])
+        self.update.callback_query.data = "coreselect:other-session:all"
+        await self.run_dispatch()
+        self.assertEqual(self.client.answer_photo.call_count, 1)

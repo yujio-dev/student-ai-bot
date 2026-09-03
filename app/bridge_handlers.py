@@ -58,6 +58,15 @@ async def show_products(message, client):
     await message.reply_text("Выбери разборы для общего баланса Student OS:", reply_markup=keyboard)
 
 
+async def send_result(message, context, result, defense_key):
+    entries = context.user_data.setdefault("core_defense", {})
+    while len(entries) >= 5:
+        entries.pop(next(iter(entries)))
+    entries[defense_key] = (time.time() + 3600, render_result(result, defense=True))
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Как защитить", callback_data=f"coredef:{defense_key}")]])
+    await send_plain(message, render_result(result), keyboard)
+
+
 async def retry_loop(application):
     data = application.bot_data
     while True:
@@ -124,6 +133,33 @@ async def dispatch(update: Update, context):
                     await send_plain(message, entry[1])
                 else:
                     await message.reply_text("Контекст защиты истёк. Он доступен час после ответа.")
+            elif action.startswith("corephoto:"):
+                await query.answer()
+                pending = context.user_data.pop("core_pending_photo", None)
+                if not pending or pending["expires"] <= time.time() or pending["quote_id"] != action[10:]:
+                    await message.reply_text("Подтверждение истекло. Пришли фото снова.")
+                else:
+                    session = await asyncio.to_thread(client.confirm_photo, user, pending["data"], "image/jpeg", pending["quote_id"])
+                    context.user_data["core_photo_session"] = session
+                    prefix = f"coreselect:{session['session_id']}:"
+                    buttons = [[InlineKeyboardButton("Все задачи", callback_data=prefix + "all")]]
+                    buttons.extend([InlineKeyboardButton(f"Задача {i+1}", callback_data=prefix + str(i))] for i in range(len(session["tasks"])))
+                    await send_plain(message, "Распознано:\n\n" + "\n\n".join(session["tasks"])[:24000], InlineKeyboardMarkup(buttons))
+            elif action.startswith("coreselect:"):
+                await query.answer()
+                session = context.user_data.get("core_photo_session")
+                if not session:
+                    session = (await asyncio.to_thread(client.latest_photo, user)).get("session")
+                    if session:
+                        context.user_data["core_photo_session"] = session
+                parts = action.split(":")
+                if not session or session["expires_at"] <= time.time() or len(parts) != 3 or parts[1] != session["session_id"]:
+                    await message.reply_text("Фото-сессия истекла. Пришли фото снова.")
+                else:
+                    choice = parts[2]
+                    selection = list(range(len(session["tasks"]))) if choice == "all" else [int(choice)]
+                    result = await asyncio.to_thread(client.answer_photo, user, session["session_id"], selection, f"telegram-photo:{user['telegram_user_id']}:{query.id}")
+                    await send_result(message, context, result, "photo" + str(message.message_id))
             elif action.startswith(("photo:", "defense:", "admin:", "feedback:")):
                 await query.answer()
                 await message.reply_text("Эта старая кнопка недоступна в общем режиме. Управление балансом — в Student OS.")
@@ -140,22 +176,40 @@ async def dispatch(update: Update, context):
         elif command in {"/admin", "/referral", "/partner", "/refstats", "/funnel", "/funnelcsv"}:
             await message.reply_text("В общем режиме управление и статистика находятся в Student OS. Старый баланс не используется.")
         elif command == "/faq":
-            await message.reply_text("Текст до 6000 символов. Один общий пробный разбор с Web; далее попытки с общего баланса. Цены: /buy. Проверяй ответы AI. Фото пока недоступно в общем режиме.")
+            await message.reply_text("Текст до 6000 символов. Один общий пробный разбор с Web; далее попытки с общего баланса. Фото до 6 МБ: trial либо 5 credits после подтверждения; задачи с того же фото доступны 24 часа без повторной оплаты. Цены: /buy. Проверяй ответы AI.")
+        elif command == "/newtask":
+            context.user_data.pop("core_pending_photo", None)
+            context.user_data.pop("core_photo_session", None)
+            await message.reply_text("Фото-контекст сброшен. Пришли новое задание.")
         elif getattr(message, "photo", None):
-            await message.reply_text("Фото ещё не подключено к общему балансу. Пришли условие текстом; попытка не списана.")
+            photo = message.photo[-1]
+            if not photo.file_size or photo.file_size > 6 * 1024 * 1024:
+                await message.reply_text("Пришли фото до 6 МБ. Попытка не списана.")
+            else:
+                file = await context.bot.get_file(photo.file_id)
+                raw = bytes(await file.download_as_bytearray())
+                if len(raw) > 6 * 1024 * 1024:
+                    await message.reply_text("Пришли фото до 6 МБ. Попытка не списана.")
+                else:
+                    quote = await asyncio.to_thread(client.quote_photo, user, raw, "image/jpeg")
+                    pending = {**quote, "data": raw, "expires": time.time() + 300}
+                    context.user_data["core_pending_photo"] = pending
+                    quote_id = quote["quote_id"]
+                    def expire():
+                        current = context.user_data.get("core_pending_photo")
+                        if current and current["quote_id"] == quote_id:
+                            context.user_data.pop("core_pending_photo", None)
+                    asyncio.get_running_loop().call_later(300, expire)
+                    cost = "одна общая бесплатная попытка" if quote["uses_trial"] else "5 оплаченных попыток" if quote["credits"] else "без списания — безлимит"
+                    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Подтвердить распознавание", callback_data=f"corephoto:{quote_id}")]]) if quote["can_confirm"] else None
+                    await message.reply_text(f"Фото-разбор: {cost}. Условия сохранятся на 24 часа. Другие задачи с этого фото — без повторного списания. До 20 запросов в час. Покупка: /buy", reply_markup=keyboard)
         elif text and not command:
             if not 3 <= len(text) <= 6000:
                 await message.reply_text("Пришли условие длиной от 3 до 6000 символов.")
             else:
                 key = f"telegram:{user['telegram_user_id']}:{update.effective_chat.id}:{message.message_id}"
                 result = (await asyncio.to_thread(client.submit_text_task, user, text, key))["result"]
-                defense_key = str(message.message_id)
-                entries = context.user_data.setdefault("core_defense", {})
-                while len(entries) >= 5:
-                    entries.pop(next(iter(entries)))
-                entries[defense_key] = (time.time() + 3600, render_result(result, defense=True))
-                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Как защитить", callback_data=f"coredef:{defense_key}")]])
-                await send_plain(message, render_result(result), keyboard)
+                await send_result(message, context, result, str(message.message_id))
         else:
             return
     except BridgeError as exc:

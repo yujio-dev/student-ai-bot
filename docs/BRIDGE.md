@@ -29,8 +29,7 @@ Text requests use Telegram user/chat/message IDs as stable request IDs. Answers
 are formatted as bounded plain-text messages (no executable markup). The defense
 button reads the same result, without a second AI call; five results per user are
 retained in process memory for at most one hour. Process restart expires buttons.
-Photo and old defense/admin/referral callbacks are blocked in bridge mode until
-their shared-domain equivalents exist; no legacy balance is consulted or mutated.
+Old defense/admin/referral callbacks are blocked in bridge mode; no legacy balance is consulted or mutated.
 The legacy reactivation-credit loop is replaced by the outbox worker in bridge mode.
 
 Manual cutover: back up both databases and the outbox; deploy Core on HTTPS with
@@ -41,3 +40,21 @@ Rollback: set the flag false and restart. Keep pending outbox rows: disabling th
 bridge stops retries and requires delivery/reconciliation before retiring Core.
 Never overwrite Core with the old bot database. No live restart, production
 deployment, credentials use or payment was performed by these tests.
+
+## Shared photo flow
+
+Bridge-mode Telegram photos now call Core quote → explicit confirmation → recognition
+→ task selection. Cost matches the old setup semantics: one shared trial or five paid
+credits (the unchanged 100 Stars package); unlimited has no debit. A changed entitlement
+requires a fresh quote instead of silently charging another source. Core validates PNG/
+JPEG bytes and decoded dimensions before AI; Telegram photos are sent as JPEG.
+The two signed photo-upload operations allow bounded 9 MiB JSON envelopes for a maximum
+6 MiB image; every other bridge request remains limited to 64 KiB.
+
+Raw pending photo bytes exist only in memory, expire after five minutes, and are removed
+on confirmation. Core retains recognized tasks for 24 hours, not raw images. Buttons
+select one/all tasks; follow-ups use the same structured engine and defense result without
+another setup charge, bounded to 20 requests/hour. Latest Core session can be recovered
+after a bot restart. Old session buttons cannot select a different newer photo silently.
+Use /newtask to clear the adapter's current selection. Quality of live OCR and real Stars
+cutover still require an explicitly authorized staging check; all automated tests use fixtures.
