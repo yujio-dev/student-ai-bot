@@ -21,6 +21,17 @@ is also in the dedicated CI job; compile/diff/PWA checks pass. CI status recorde
 Original app/bot.py branding and untracked assets/outputs preserved, not staged.
 Deployment remains worker=0; no runtime acceptance or live cutover claimed.
 
+Final external verification: code 57c205a pushed; GitHub run 33870851244 GREEN,
+including tests and PostgreSQL-outbox jobs (new persisted backoff contract included).
+Same tested commit deployed to existing student-ai-bot-ernar-beta, Heroku release v5:
+Python 3.12.14, successful dependency/buildpack build, Procfile worker only. Explicitly
+set worker=0:Eco; subsequent ps returned No dynos. No polling/one-off runtime started.
+Core 29393cf CI run 33870953687 GREEN, both normal and PostgreSQL jobs. No credentials,
+Doppler syncs or managed DATABASE_URL changed. No additional paid resource.
+Only owner branding/assets/outputs remain dirty; migration changes committed/pushed.
+STOP gate: owner scoped Doppler login, then allowlisted migration and Core preflight;
+bot stays worker=0/latch=false. Full cloud behavior still unverified, not live cutover.
+
 ## 2026-09-04 — PostgreSQL durable payment outbox
 
 Started from f6e4552, preserving pre-existing app/bot.py branding edits and assets/outputs.
