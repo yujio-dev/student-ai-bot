@@ -2,3 +2,4 @@ openai>=2.0,<3.0
 python-dotenv>=1.0,<2.0
 python-telegram-bot>=22.0,<23.0
 psycopg[binary]>=3.2,<4.0
+sentry-sdk>=2.68,<3.0

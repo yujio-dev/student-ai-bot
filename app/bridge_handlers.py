@@ -73,10 +73,12 @@ async def retry_loop(application):
     data = application.bot_data
     while True:
         try:
-            await asyncio.to_thread(data["payment_outbox"].retry, data["bridge"], 20)
+            await asyncio.to_thread(data["payment_outbox"].retry, data["bridge"], 20, backoff=True)
         except Exception:
             # Do not log payment payload or raw transport exceptions.
             logger.error("Payment outbox retry failed; durable records retained")
+            from app.observability import report
+            report("outbox_retry_failed")
         await asyncio.sleep(60)
 
 

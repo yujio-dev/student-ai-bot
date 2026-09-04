@@ -94,9 +94,15 @@ class PaymentOutbox:
                 (now, error, "pending" if error else "delivered", None if error else now, row["charge_id"]))
         return error is None
 
-    def retry(self, client: StudentOSBridgeClient, limit: int = 20) -> int:
+    def retry(self, client: StudentOSBridgeClient, limit: int = 20, *, backoff: bool = False) -> int:
         delivered = 0
-        for row in self.pending(limit):
+        rows = self.pending(100 if backoff else limit)
+        if backoff:
+            now = int(time.time())
+            rows = [row for row in rows if row["last_attempt_at"] is None or
+                    now >= row["last_attempt_at"] + min(3600, 60 * (2 ** min(max(row["attempts"]-1,0),6)))]
+            rows = rows[:min(max(limit, 1), 100)]
+        for row in rows:
             if self.deliver(client, row):
                 delivered += 1
             else:

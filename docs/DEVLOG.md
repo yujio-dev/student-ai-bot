@@ -1,5 +1,26 @@
 # Development checkpoints
 
+## 2026-09-04 — Independent cloud readiness while Doppler login blocked
+
+Owner explicitly blocks Doppler CLI login until home. No attempts to log in, no secret
+migration, no config-var changes, no live restart/cutover or additional paid resources.
+Added Python 3.12/worker-only Procfile and slug exclusions. Cloud entry point does not
+initialize legacy SQLite/AI and checks an independent false-by-default polling latch
+before loading credentials. Preflight reads environment only and reports key names.
+Eco background retry uses persisted capped exponential backoff; empty queues do not
+wake Core. Pending paid records remain durable, with unchanged charge idempotency.
+Optional content-free Sentry uses a real SDK with memory-transport privacy regression.
+Deployment/rollback and config boundaries documented in CLOUD_READINESS.md.
+
+ATTACK: tested accidental polling without credentials, invalid cloud configs/HTTPS,
+secret-bearing URL shapes, hostile telemetry content, duplicate/replayed payment,
+persisted retry delay and high attempt-count cap. No real Telegram/OpenAI calls.
+Local full suite: 89 tests, 4 expected PostgreSQL skips. Existing real-Heroku persistence
+suite: 6 passed (132s), including abrupt process crash. Added PostgreSQL backoff contract
+is also in the dedicated CI job; compile/diff/PWA checks pass. CI status recorded after push.
+Original app/bot.py branding and untracked assets/outputs preserved, not staged.
+Deployment remains worker=0; no runtime acceptance or live cutover claimed.
+
 ## 2026-09-04 — PostgreSQL durable payment outbox
 
 Started from f6e4552, preserving pre-existing app/bot.py branding edits and assets/outputs.

@@ -107,3 +107,27 @@ class BridgeTest(unittest.TestCase):
             self.assertEqual(outbox.retry(core), 0)
             self.assertEqual(core.record_payment.call_count, 1)
             self.assertEqual(len(outbox.pending()), 5)
+
+    def test_worker_backoff_is_persisted_and_bounded(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "backoff.db"
+            outbox = PaymentOutbox(path)
+            core = Mock()
+            core.record_payment.side_effect = BridgeError(503)
+            with patch('app.payment_outbox.time.time', return_value=1000):
+                outbox.enqueue(payment())
+                outbox.retry(core, backoff=True)
+            with patch('app.payment_outbox.time.time', return_value=1059):
+                PaymentOutbox(path).retry(core, backoff=True)
+                self.assertEqual(core.record_payment.call_count,1)
+            with patch('app.payment_outbox.time.time', return_value=1060):
+                PaymentOutbox(path).retry(core, backoff=True)
+                self.assertEqual(core.record_payment.call_count,2)
+            with outbox._connect() as db:
+                db.execute('UPDATE payment_outbox SET attempts=100,last_attempt_at=1000')
+            with patch('app.payment_outbox.time.time', return_value=4599):
+                outbox.retry(core, backoff=True)
+                self.assertEqual(core.record_payment.call_count,2)
+            with patch('app.payment_outbox.time.time', return_value=4600):
+                outbox.retry(core, backoff=True)
+                self.assertEqual(core.record_payment.call_count,3)

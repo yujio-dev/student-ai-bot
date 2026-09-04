@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from app.bridge_client import BridgeError
@@ -25,6 +25,22 @@ def receipt():
 
 
 class OutboxContract:
+    def test_persisted_backoff_survives_reopen(self):
+        box = self.open()
+        core = Mock()
+        core.record_payment.side_effect = BridgeError(503)
+        with patch('app.payment_outbox.time.time', return_value=1000):
+            box.enqueue(payload())
+            self.assertEqual(box.retry(core, backoff=True), 0)
+        with patch('app.payment_outbox.time.time', return_value=1059):
+            self.assertEqual(self.open().retry(core, backoff=True), 0)
+            self.assertEqual(core.record_payment.call_count, 1)
+        core.record_payment.side_effect = None
+        core.record_payment.return_value = receipt()
+        with patch('app.payment_outbox.time.time', return_value=1060):
+            self.assertEqual(self.open().retry(core, backoff=True), 1)
+        self.assertEqual(self.open().pending(), [])
+
     def test_faults_malformed_and_wrong_receipts_remain_pending(self):
         box = self.open()
         box.enqueue(payload())
