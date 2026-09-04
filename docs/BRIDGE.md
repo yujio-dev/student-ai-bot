@@ -12,7 +12,7 @@ The client signs `v2.POST.<endpoint path>.<timestamp>.<nonce>.<exact UTF-8 JSON>
 rejects redirects and never retries AI automatically. Payments use Core's existing
 `charge_id`, `product_id`, `stars_paid`, `telegram` contract.
 
-The outbox is a separate SQLite journal, not the old user/payment ledger. Persist a
+The outbox is a separate persistence boundary, not the old user/payment ledger. Persist a
 successful Telegram payment before network delivery. Retry pending rows at startup
 and periodically in bounded batches. Core credits once by charge ID. An ambiguous
 timeout stays pending. A late failed retry cannot downgrade an already delivered row.
@@ -24,6 +24,23 @@ updates. /start buy opens the Core catalog directly. Pre-checkout fails closed i
 the five-second catalog request fails. The outbox retries at startup and every
 60 seconds in batches of 20. Invalid receipts remain pending. The journal is
 `core_payment_outbox.db` beside DATABASE_PATH; back it up along with Core data.
+
+On Heroku, managed `DATABASE_URL` selects PostgreSQL schema `bot_outbox` in the SAME
+Essential-0 as Core. Do not create another add-on or sync this URL from Doppler.
+Cloud bridge boot without a URL fails closed. SQLite remains the local fallback.
+Only outbox records/indexes are written by this adapter; all business mutations use
+the signed Core API. Two bounded connections, remote TLS, 10s connection/lock and 15s
+statement timeouts; atomic idempotent schema initialization. No DB transaction spans
+HTTP delivery. Concurrent delivery is at-least-once; Core charge uniqueness enforces
+exactly-once credits. Unknown/wrong receipts remain pending; delivered rows are not
+resent from stale snapshots. Never delete the journal on rollback.
+
+Tests include a child process terminated via os._exit after durable enqueue and
+restart, malformed receipts, network/500/timeout failures and concurrent retries.
+Storage failure BEFORE enqueue is not a durable acceptance: no success is reported,
+and an operator must reconcile Telegram payments if Telegram has acknowledged the
+update. PostgreSQL durability does not make Telegram polling + database one atomic
+transaction. Cutover must include this operational recovery boundary.
 
 Text requests use Telegram user/chat/message IDs as stable request IDs. Answers
 are formatted as bounded plain-text messages (no executable markup). The defense

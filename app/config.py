@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -27,6 +27,7 @@ class Settings:
     student_os_bridge_enabled: bool = False
     student_os_api_url: str = ""
     student_os_bridge_secret: str = ""
+    outbox_database_url: str = field(default="", repr=False)
 
 
 def load_settings() -> Settings:
@@ -50,6 +51,7 @@ def load_settings() -> Settings:
         student_os_bridge_enabled=os.getenv("STUDENT_OS_BRIDGE_ENABLED", "false").lower() == "true",
         student_os_api_url=os.getenv("STUDENT_OS_API_URL", "").strip(),
         student_os_bridge_secret=os.getenv("STUDENT_OS_BRIDGE_SECRET", "").strip(),
+        outbox_database_url=os.getenv("DATABASE_URL", "").strip(),
     )
     missing = []
     if not settings.telegram_bot_token:
@@ -59,6 +61,8 @@ def load_settings() -> Settings:
     if missing:
         raise RuntimeError(f"Заполните в .env: {', '.join(missing)}")
     if settings.student_os_bridge_enabled:
+        if os.getenv("DYNO") and not settings.outbox_database_url:
+            raise RuntimeError("Cloud bridge requires PostgreSQL outbox DATABASE_URL")
         from app.bridge_client import StudentOSBridgeClient
         StudentOSBridgeClient(settings.student_os_api_url, settings.student_os_bridge_secret)
     if (settings.pack_price_stars <= 0 or settings.pack_credits <= 0

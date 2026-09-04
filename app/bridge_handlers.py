@@ -239,5 +239,10 @@ def install(application, settings):
     if not settings.student_os_bridge_enabled:
         return
     application.bot_data["bridge"] = StudentOSBridgeClient(settings.student_os_api_url, settings.student_os_bridge_secret)
-    application.bot_data["payment_outbox"] = PaymentOutbox(settings.database_path.with_name("core_payment_outbox.db"))
+    if settings.outbox_database_url:
+        from app.postgres_outbox import PostgresPaymentOutbox
+        outbox = PostgresPaymentOutbox(settings.outbox_database_url)
+    else:
+        outbox = PaymentOutbox(settings.database_path.with_name("core_payment_outbox.db"))
+    application.bot_data["payment_outbox"] = outbox
     application.add_handler(TypeHandler(Update, dispatch), group=-1)

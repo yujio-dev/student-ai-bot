@@ -11,6 +11,7 @@ import json
 import secrets
 import time
 import base64
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -66,7 +67,7 @@ class StudentOSBridgeClient:
         except HTTPError as exc:
             # Never retain response bodies, URLs or credentials in errors/logs.
             raise BridgeError(exc.code) from None
-        except (URLError, OSError, ValueError):
+        except (URLError, OSError, ValueError, HTTPException):
             raise BridgeError(503) from None
 
     def resolve_user(self, telegram: dict) -> dict:

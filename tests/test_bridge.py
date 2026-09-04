@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 import os
 from urllib.error import HTTPError, URLError
+from http.client import IncompleteRead
 
 from app.bridge_client import BridgeError, StudentOSBridgeClient
 from app.payment_outbox import PaymentOutbox
@@ -52,7 +53,7 @@ class BridgeTest(unittest.TestCase):
             client._opener.open.return_value = io.BytesIO(raw)
             with self.assertRaises(BridgeError):
                 client.get_products()
-        for exc in (URLError("sensitive body"), HTTPError("secret-url", 401, "private", {}, None)):
+        for exc in (URLError("sensitive body"), HTTPError("secret-url", 401, "private", {}, None), IncompleteRead(b"private")):
             client._opener.open.side_effect = exc
             with self.assertRaises(BridgeError) as caught:
                 client.get_products()

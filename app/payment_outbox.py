@@ -61,10 +61,18 @@ class PaymentOutbox:
         return dict(row) if row else None
 
     def deliver(self, client: StudentOSBridgeClient, row: dict) -> bool:
+        current = self.get(row["charge_id"])
+        if not current:
+            return False
+        if current["delivery_state"] == "delivered":
+            return True
+        row = current
         error = None
         try:
             payload = json.loads(row["payload"])
             response = client.record_payment(payload)
+            if not isinstance(response, dict) or not isinstance(response.get("payment"), dict):
+                raise BridgeError(502)
             receipt = response.get("payment", {})
             if (receipt.get("telegram_payment_charge_id") != payload["charge_id"]
                     or receipt.get("product_id") != payload["product_id"]
@@ -73,6 +81,10 @@ class PaymentOutbox:
                 raise BridgeError(502)
         except BridgeError as exc:
             error = f"core_http_{exc.status}"
+        except (ValueError, TypeError, KeyError):
+            error = "core_http_502"
+        except (OSError, ConnectionError):
+            error = "core_http_503"
         now = int(time.time())
         with self._connect() as db:
             # A late failed concurrent retry must never downgrade delivered.
