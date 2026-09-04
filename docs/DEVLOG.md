@@ -78,6 +78,44 @@ domain/OIDC/Sentry/device QA/cold-start and final cutover. Storage unavailable b
 enqueue requires Telegram reconciliation; see BRIDGE.md. No live cutover claimed.
 ## 2026-09-04 — Authorized production deployment and isolated monitoring smoke
 
+Final cloud verification for this checkpoint:
+- Core 1406110 deployed v10; Bot 98ad33f deployed v10. Bot push connection reset
+  during build, but read-only release inspection proved deployment succeeded; no
+  duplicate build was submitted. Core Eco web up; Bot has NO dynos after one-offs.
+- GitHub CI green: Core 33895894959, Bot 33895845553 (including real PG CI jobs).
+- Doppler API: exactly the two existing stg syncs enabled/status=synced. Actual
+  destination values match all source values. DATABASE_URL excluded from Doppler.
+- One synthetic event per service sent from finished Heroku one-off processes:
+  Core 88b87b6ff1054d78bbaba203bf5727ae, issue 144972255;
+  Bot fe62a8e76d534ceda0f5772540f24c31, issue 144972114.
+  Both arrived in Sentry UI, production environment, fixed service/category tags,
+  zero users, no assignment/AI text, request, cookies, auth payload or exception
+  stack. SDK regression proves allowlisted outbound envelope. Sentry adds its own
+  trace context and Heroku egress geography (Dublin); this is not end-user identity.
+  Full raw server-normalized JSON was not separately audited/downloaded.
+- Exactly one short real cloud AI submission passed live mode, how_to_defend and
+  consumption of first free trial. No real Stars/Telegram API calls. Bridge response
+  does not expose token counts (reported None); no additional AI calls made to measure.
+- Public Heroku HTTPS browser loads Telegram-only login gate. Auth options show
+  development_login=false; dev-login 404, unauthenticated admin/session 401.
+- Actual HTML manifest URL /static/manifest.webmanifest HTTP 200 (root /manifest
+  is not a route); scope/start_url '/', standalone, icons and root /sw.js HTTP 200.
+  PWA runtime regression passed; service worker allowlist excludes all /api and
+  /admin traffic. No installation/standalone/offline-device claim from this check.
+- Local cloud acceptance used the real Bot adapter against Heroku HTTPS Core; it
+  is not a custom-domain or cloud-worker-origin test. Restart proof is process-cold,
+  not actual idle-sleep wake timing. These distinctions remain explicit.
+
+Remaining acceptance is NOT declared green: DNS/ACM custom-domain routing, real OIDC
+callback/login, verified owner admin, authenticated BrowserStack flows, real-device
+PWA install/offline, and final live bot cutover. DNS and cutover are explicitly held
+by owner; do not bypass login, enable dev auth, start polling, or purchase resources.
+Next exact gated step: after separate owner permission to change DNS, point only
+student-os.dev to the already assigned Heroku target, verify ACM/HTTPS, then perform
+real OIDC and authenticated device QA. Keep worker=0 throughout these checks.
+If DNS remains on hold, do not claim custom-domain beta or final cutover readiness.
+
+
 Owner explicitly authorized Core production mode/deployment and Sentry DSN storage
 in both existing Doppler stg configs. Latest restrictions: no DNS changes, no live
 Telegram cutover, cloud worker stays zero. No new resources/plans were provisioned.
