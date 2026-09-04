@@ -1,5 +1,22 @@
 # Development checkpoints
 
+## 2026-09-04 — Monitoring labels and non-polling runtime preflight
+
+Sentry scrubber now preserves only allowlisted environment and service labels, while
+continuing to discard payloads, requests, credentials, user data and arbitrary host
+names. Invalid/unhashable categories drop safely. SENTRY_ENVIRONMENT is restricted to
+development/test/staging/production; explicitly set intended cloud label before enabling
+DSN. Privacy tests run against the real SDK with memory transport, no sensitive events.
+
+Added optional `python -m app.cloud_preflight --storage`: imports cloud entrypoint without
+calling it, verifies latch false, initializes/reads only bot-owned PostgreSQL outbox,
+discards rows and reports generic success/failure. No polling or Core payment mutation.
+Existing config-only command passed inside an actual one-off Eco dyno, exit 0. An
+inline extended probe failed at local Windows quoting before remote execution; replaced
+with the testable module option. Extended deployed probe still pending a tested release.
+Owner OIDC setup now confirmed by Core read-only preflight. Core remains staging until
+explicit production-mode permission is accepted by action review. No live restart.
+
 ## 2026-09-04 — Independent cloud readiness while Doppler login blocked
 
 Owner explicitly blocks Doppler CLI login until home. No attempts to log in, no secret

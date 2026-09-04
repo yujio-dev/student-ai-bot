@@ -1,8 +1,19 @@
 import unittest
+from unittest.mock import patch
 from app.cloud_preflight import issues
 
 
 class PreflightTest(unittest.TestCase):
+    def test_storage_probe_never_starts_polling(self):
+        from app.cloud_preflight import storage_probe
+        with patch('app.postgres_outbox.PostgresPaymentOutbox') as box, patch('app.cloud_worker.main') as polling:
+            storage_probe({'DATABASE_URL':'postgresql://synthetic', 'CLOUD_POLLING_ENABLED':'false'})
+            box.assert_called_once_with('postgresql://synthetic')
+            box.return_value.pending.assert_called_once_with(1)
+            polling.assert_not_called()
+        with self.assertRaises(RuntimeError):
+            storage_probe({'CLOUD_POLLING_ENABLED':'true'})
+
     def test_missing_reports_names_only(self):
         for service in ("core", "bot"):
             result = issues({}, service)

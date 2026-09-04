@@ -1,5 +1,6 @@
 """Read-only environment preflight: no dotenv, storage, network or secret output."""
 import os
+import argparse
 
 SERVICE = "bot"
 from urllib.parse import urlsplit
@@ -47,11 +48,32 @@ def issues(env, service):
     return failures
 
 
+def storage_probe(env):
+    if env.get("CLOUD_POLLING_ENABLED", "false").lower() != "false":
+        raise RuntimeError("Polling latch must remain disabled")
+    # Import the deployed entrypoint without calling build/main or Telegram APIs.
+    from app import cloud_worker
+    from app.postgres_outbox import PostgresPaymentOutbox
+    box = PostgresPaymentOutbox(env["DATABASE_URL"])
+    box.pending(1)  # Discard rows; never log payment envelopes.
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--storage", action="store_true", help="Check cloud imports and initialize/read bot outbox; never poll")
+    args = parser.parse_args()
     failures = issues(os.environ, SERVICE)
     for item in failures:
         print(item)
-    print("BLOCKED_BY_DOPPLER_LOGIN_OR_CONFIG" if failures else "CONFIG_READY_NOT_RUNTIME_VERIFIED")
+    if not failures and args.storage:
+        try:
+            storage_probe(os.environ)
+        except Exception:
+            print("STORAGE_PREFLIGHT_FAILED_DETAILS_SUPPRESSED")
+            return 1
+        print("CLOUD_IMPORTS_AND_POSTGRES_OUTBOX_OK_NO_POLLING")
+    else:
+        print("BLOCKED_BY_DOPPLER_LOGIN_OR_CONFIG" if failures else "CONFIG_READY_NOT_RUNTIME_VERIFIED")
     return int(bool(failures))
 
 
