@@ -143,3 +143,32 @@ applied_at. Catalog, entitlement and duplicate-payment delivery work after resta
 This is an actual process-cold/restart test, NOT proof of a 30-minute Eco sleep wake.
 Custom-domain OIDC/browser/admin proof remains blocked by owner's explicit DNS hold.
 No local bot restart and no cloud polling were performed; owner edits stay untouched.
+
+## 2026-09-05 — Fail-closed cutover preparation
+
+Cloud Bot commit f6b68a5 adds a PostgreSQL advisory polling lease, so an accidental
+second cloud worker fails closed before Telegram polling. The safe log marker proves
+lease acquisition without exposing configuration. The no-polling preflight now reports
+aggregate outbox counts only; production returned pending=0 and delivered=1. Runtime
+imports and shared PostgreSQL connectivity passed. A privacy-safe Bot Sentry synthetic
+event was queued; scrubbing/category tests remain green.
+
+Added a consistent SQLite online backup tool with SHA-256 plus integrity verification
+and an explicit local-bot cutover controller. The controller records only task state,
+disables Scheduled Task autorestart before stopping, proves zero processes/listeners,
+and restores exactly one local lock on rollback. Only read-only Status was run:
+Supervisors=0, BotProcesses=2, LockListeners=1, ScheduledTask=Ready. The legacy bot was
+not stopped or changed. Local backup 20260905T023616Z verified; the shared Heroku
+PostgreSQL manual backup b001 completed and includes the Bot schema/outbox.
+
+Full Bot regression: 98 passed / 4 expected local PostgreSQL skips; compile and diff
+checks passed. The deployed production PostgreSQL preflight exercised schema creation,
+connectivity and aggregate reads; the repository tests are intentionally omitted from
+the production slug, so the attempted in-slug unittest import was not counted as a
+passing test. The prior cloud lost-response/restart/exactly-once acceptance remains
+valid. Public tracked-file scan found only `.env.example`; the sole credential-pattern
+file is the CI scanner matching its own pattern. Commit f6b68a5 was pushed, GitHub CI
+33940001930 is green, and it is Heroku Bot release v11. Heroku still reports No dynos
+(worker=0); `CLOUD_POLLING_ENABLED` remains false. No cutover, payment, resource, DNS,
+secret or database mutation occurred beyond the approved verified backups and isolated
+preflights. Exact next gate is the owner's real OIDC/admin session at the laptop.
