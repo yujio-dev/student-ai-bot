@@ -8,3 +8,4 @@ data/*.db-wal
 /student_ai_bot.db
 .pytest_cache/
 logs/
+backups/

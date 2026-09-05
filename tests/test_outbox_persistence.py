@@ -120,6 +120,13 @@ class SQLiteOutboxTest(OutboxContract, unittest.TestCase):
     def child_environment(self):
         return {"OUTBOX_PATH": str(self.path), "OUTBOX_SCHEMA": ""}
 
+    def test_backlog_returns_counts_only(self):
+        box = self.open()
+        item = payload()
+        item["charge_id"] = "count-pending"
+        box.enqueue(item)
+        self.assertEqual(box.backlog(), {"pending": 1, "delivered": 0})
+
 
 @unittest.skipUnless(os.getenv("BOT_OUTBOX_TEST_URL"), "PostgreSQL test URL not configured")
 class PostgreSQLOutboxTest(OutboxContract, unittest.TestCase):

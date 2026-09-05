@@ -55,7 +55,7 @@ def storage_probe(env):
     from app import cloud_worker
     from app.postgres_outbox import PostgresPaymentOutbox
     box = PostgresPaymentOutbox(env["DATABASE_URL"])
-    box.pending(1)  # Discard rows; never log payment envelopes.
+    return box.backlog()  # Counts only; never load or log payment envelopes.
 
 
 def main():
@@ -67,11 +67,12 @@ def main():
         print(item)
     if not failures and args.storage:
         try:
-            storage_probe(os.environ)
+            backlog = storage_probe(os.environ)
         except Exception:
             print("STORAGE_PREFLIGHT_FAILED_DETAILS_SUPPRESSED")
             return 1
-        print("CLOUD_IMPORTS_AND_POSTGRES_OUTBOX_OK_NO_POLLING")
+        print("CLOUD_IMPORTS_AND_POSTGRES_OUTBOX_OK_NO_POLLING "
+              f"pending={backlog['pending']} delivered={backlog['delivered']}")
     else:
         print("BLOCKED_BY_DOPPLER_LOGIN_OR_CONFIG" if failures else "CONFIG_READY_NOT_RUNTIME_VERIFIED")
     return int(bool(failures))

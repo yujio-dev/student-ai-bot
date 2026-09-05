@@ -2,7 +2,7 @@ import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
-from app.cloud_worker import main, validate, build
+from app.cloud_worker import main, polling_lease, validate, build
 
 
 class CloudReadinessTest(unittest.TestCase):
@@ -22,6 +22,37 @@ class CloudReadinessTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'polling disabled'):
                 main()
             load.assert_not_called()
+
+    def test_enabled_worker_holds_database_lease_for_entire_polling_run(self):
+        settings = SimpleNamespace(outbox_database_url='postgresql://example')
+        application = SimpleNamespace(run_polling=lambda **kwargs: calls.append(kwargs))
+        calls = []
+        lease = patch('app.cloud_worker.polling_lease')
+        with patch.dict(os.environ, {'CLOUD_POLLING_ENABLED':'true'}, clear=True), \
+             patch('app.cloud_worker.load_settings', return_value=settings), \
+             patch('app.cloud_worker.build', return_value=application), \
+             patch('app.observability.initialize'), \
+             lease as mocked_lease:
+            main()
+        mocked_lease.assert_called_once_with('postgresql://example')
+        self.assertEqual(calls, [{'allowed_updates': __import__('telegram').Update.ALL_TYPES}])
+
+    def test_polling_lease_rejects_second_worker_and_releases_first(self):
+        connection = unittest.mock.Mock()
+        connection.execute.return_value.fetchone.return_value = (True,)
+        with patch('app.cloud_worker.psycopg.connect', return_value=connection):
+            with polling_lease('postgresql://localhost/example'):
+                pass
+        self.assertEqual(connection.execute.call_count, 2)
+        connection.close.assert_called_once()
+
+        connection = unittest.mock.Mock()
+        connection.execute.return_value.fetchone.return_value = (False,)
+        with patch('app.cloud_worker.psycopg.connect', return_value=connection):
+            with self.assertRaisesRegex(RuntimeError, 'already owns'):
+                with polling_lease('postgresql://localhost/example'):
+                    pass
+        connection.close.assert_called_once()
 
     def test_fail_closed_config(self):
         values = dict(student_os_bridge_enabled=True, outbox_database_url='postgresql://example',

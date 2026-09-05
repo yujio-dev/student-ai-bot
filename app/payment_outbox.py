@@ -55,6 +55,15 @@ class PaymentOutbox:
                 "SELECT * FROM payment_outbox WHERE delivery_state='pending' ORDER BY COALESCE(last_attempt_at,0),created_at LIMIT ?",
                 (min(max(limit, 1), 100),))]
 
+    def backlog(self) -> dict[str, int]:
+        """Return aggregate delivery counts without exposing payment payloads."""
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT delivery_state, COUNT(*) AS count FROM payment_outbox GROUP BY delivery_state"
+            )
+            counts = {row["delivery_state"]: row["count"] for row in rows}
+        return {"pending": counts.get("pending", 0), "delivered": counts.get("delivered", 0)}
+
     def get(self, charge_id):
         with self._connect() as db:
             row = db.execute("SELECT * FROM payment_outbox WHERE charge_id=?", (charge_id,)).fetchone()

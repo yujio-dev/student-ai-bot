@@ -7,9 +7,11 @@ class PreflightTest(unittest.TestCase):
     def test_storage_probe_never_starts_polling(self):
         from app.cloud_preflight import storage_probe
         with patch('app.postgres_outbox.PostgresPaymentOutbox') as box, patch('app.cloud_worker.main') as polling:
-            storage_probe({'DATABASE_URL':'postgresql://synthetic', 'CLOUD_POLLING_ENABLED':'false'})
+            box.return_value.backlog.return_value = {'pending': 2, 'delivered': 3}
+            result = storage_probe({'DATABASE_URL':'postgresql://synthetic', 'CLOUD_POLLING_ENABLED':'false'})
             box.assert_called_once_with('postgresql://synthetic')
-            box.return_value.pending.assert_called_once_with(1)
+            box.return_value.backlog.assert_called_once_with()
+            self.assertEqual(result, {'pending': 2, 'delivered': 3})
             polling.assert_not_called()
         with self.assertRaises(RuntimeError):
             storage_probe({'CLOUD_POLLING_ENABLED':'true'})

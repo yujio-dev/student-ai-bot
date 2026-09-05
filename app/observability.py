@@ -2,7 +2,8 @@
 import os
 import re
 
-CATEGORIES = {"synthetic_check", "core_unhandled", "outbox_retry_failed"}
+CATEGORIES = {"synthetic_check", "core_unhandled", "outbox_retry_failed",
+              "polling_lease_failed"}
 ENVIRONMENTS = {"production", "staging", "development", "test"}
 _client = None
 
